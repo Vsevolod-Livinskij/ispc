@@ -2906,8 +2906,11 @@ FunctionEmitContext::scatter(llvm::Value *value, llvm::Value *ptr,
 
     const PointerType *pt = CastType<PointerType>(valueType);
 
-    // And everything should be a pointer or atomic from here on out...
-    AssertPos(currentPos, pt != NULL || CastType<AtomicType>(valueType) != NULL);
+    // And everything should be a pointer or atomic (or enum) from here on out...
+    AssertPos(currentPos, 
+              pt != NULL 
+              || CastType<AtomicType>(valueType) != NULL
+              || CastType<EnumType>(valueType) != NULL);
 
     llvm::Type *type = value->getType();
     const char *funcName = NULL;
@@ -3285,6 +3288,20 @@ FunctionEmitContext::CallInst(llvm::Value *func, const FunctionType *funcType,
         // pointer, so just emit the IR directly.
         llvm::Instruction *ci =
             llvm::CallInst::Create(func, argVals, name ? name : "", bblock);
+
+        // Copy noalias attribute to call instruction, to enable better
+        // alias analysis.
+        // TODO: what other attributes needs to be copied?
+        // TODO: do the same for varing path.
+#if defined (LLVM_3_3)
+        llvm::CallInst *cc = llvm::dyn_cast<llvm::CallInst>(ci);
+        if (cc &&
+            cc->getCalledFunction() &&
+            cc->getCalledFunction()->doesNotAlias(0)) {
+            cc->addAttribute(0, llvm::Attribute::NoAlias);
+        }
+#endif
+
         AddDebugPos(ci);
         return ci;
     }

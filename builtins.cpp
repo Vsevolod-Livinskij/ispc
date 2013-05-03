@@ -406,8 +406,10 @@ lSetInternalFunctions(llvm::Module *module) {
         "__count_trailing_zeros_i64",
         "__count_leading_zeros_i32",
         "__count_leading_zeros_i64",
-        "__delete_uniform",
-        "__delete_varying",
+        "__delete_uniform_32rt",
+        "__delete_uniform_64rt",
+        "__delete_varying_32rt",
+        "__delete_varying_64rt",
         "__do_assert_uniform",
         "__do_assert_varying",
         "__do_print",
@@ -477,9 +479,11 @@ lSetInternalFunctions(llvm::Module *module) {
         "__min_varying_uint32",
         "__min_varying_uint64",
         "__movmsk",
-        "__new_uniform",
-        "__new_varying32",
-        "__new_varying64",
+        "__new_uniform_32rt",
+        "__new_uniform_64rt",
+        "__new_varying32_32rt",
+        "__new_varying32_64rt",
+        "__new_varying64_64rt",
         "__none",
         "__num_cores",
         "__packed_load_active",
@@ -970,7 +974,8 @@ DefineStdlib(SymbolTable *symbolTable, llvm::LLVMContext *ctx, llvm::Module *mod
         // If the user wants the standard library to be included, parse the
         // serialized version of the stdlib.ispc file to get its
         // definitions added.
-      if (g->target->getISA() == Target::GENERIC&&g->target->getVectorWidth()!=1) { // 1 wide uses x86 stdlib
+        if (g->target->getISA() == Target::GENERIC &&
+            g->target->getVectorWidth() != 1) { // 1 wide uses x86 stdlib
             extern char stdlib_generic_code[];
             yy_scan_string(stdlib_generic_code);
             yyparse();

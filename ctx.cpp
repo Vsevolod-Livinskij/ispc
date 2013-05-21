@@ -553,8 +553,10 @@ FunctionEmitContext::EndIf() {
                                      breakLanes, "|break_lanes");
         }
 
-        llvm::Value *notBreakOrContinue =
-            NotOperator(bcLanes, "!(break|continue)_lanes");
+        llvm::Value *notBreakOrContinue = 
+            BinaryOperator(llvm::Instruction::Xor,
+                           bcLanes, LLVMMaskAllOn,
+                           "!(break|continue)_lanes");
         llvm::Value *oldMask = GetInternalMask();
         llvm::Value *newMask =
             BinaryOperator(llvm::Instruction::And, oldMask,
@@ -659,7 +661,9 @@ FunctionEmitContext::restoreMaskGivenReturns(llvm::Value *oldMask) {
     // newMask = (oldMask & ~returnedLanes)
     llvm::Value *returnedLanes = LoadInst(returnedLanesPtr,
                                           "returned_lanes");
-    llvm::Value *notReturned = NotOperator(returnedLanes, "~returned_lanes");
+    llvm::Value *notReturned = BinaryOperator(llvm::Instruction::Xor,
+                                              returnedLanes, LLVMMaskAllOn,
+                                              "~returned_lanes");
     llvm::Value *newMask = BinaryOperator(llvm::Instruction::And,
                                           oldMask, notReturned, "new_mask");
     SetInternalMask(newMask);
@@ -837,6 +841,9 @@ FunctionEmitContext::jumpIfAllLoopLanesAreDone(llvm::BasicBlock *target) {
     if (breakLanesPtr == NULL) {
         llvm::Value *continued = LoadInst(continueLanesPtr,
                                           "continue_lanes");
+        continued = BinaryOperator(llvm::Instruction::And,
+                                   continued, GetFunctionMask(),
+                                   "continued&func");
         allDone = MasksAllEqual(continued, blockEntryMask);
     }
     else {
@@ -856,6 +863,10 @@ FunctionEmitContext::jumpIfAllLoopLanesAreDone(llvm::BasicBlock *target) {
             finishedLanes = BinaryOperator(llvm::Instruction::Or, finishedLanes,
                                            continued, "returned|breaked|continued");
         }
+        
+        finishedLanes = BinaryOperator(llvm::Instruction::And,
+                                       finishedLanes, GetFunctionMask(),
+                                       "finished&func");
 
         // Do we match the mask at loop or switch statement entry?
         allDone = MasksAllEqual(finishedLanes, blockEntryMask);
@@ -1262,7 +1273,7 @@ FunctionEmitContext::CurrentLanesReturned(Expr *expr, bool doCoherenceCheck) {
             LoadInst(returnedLanesPtr, "old_returned_lanes");
         llvm::Value *newReturnedLanes =
             BinaryOperator(llvm::Instruction::Or, oldReturnedLanes,
-                           GetInternalMask(), "old_mask|returned_lanes");
+                           GetFullMask(), "old_mask|returned_lanes");
 
         // For 'coherent' return statements, emit code to check if all
         // lanes have returned

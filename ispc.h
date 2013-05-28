@@ -38,7 +38,7 @@
 #ifndef ISPC_H
 #define ISPC_H
 
-#define ISPC_VERSION "1.3.1dev"
+#define ISPC_VERSION "1.4.0"
 
 #if !defined(LLVM_3_1) && !defined(LLVM_3_2) && !defined(LLVM_3_3) && !defined(LLVM_3_4)
 #error "Only LLVM 3.1, 3.2, 3.3 and the 3.4 development branch are supported"
@@ -551,6 +551,10 @@ struct Globals {
     /** Additional user-provided directories to search when processing
         #include directives in the preprocessor. */
     std::vector<std::string> includePath;
+
+    /** Indicates that alignment in memory allocation routines should be
+        forced to have given value. -1 value means natural alignment for the platforms. */
+    int forceAlignment;
 };
 
 enum {

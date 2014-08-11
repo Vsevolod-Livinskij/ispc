@@ -721,19 +721,6 @@ def run_tests(options1, args, print_version):
     else:
         opt = "-O2"
 
-    try:
-        for fname in compile_error_files:
-            common.ex_state.add_to_tt(fname, options.arch, opt, options.target, OS, options.compiler_exe, 0, 1)
-
-        for fname in run_error_files:
-            common.ex_state.add_to_tt(fname, options.arch, opt, options.target, OS, options.compiler_exe, 1, 0)
-
-        for fname in run_succeed_files:
-            common.ex_state.add_to_tt(fname, options.arch, opt, options.target, OS, options.compiler_exe, 0, 0)
-    
-    except:
-        print_debug("Exception in ex_state. Skipping...", s, run_tests_log)
-
 
     for jb in task_threads:
         if not jb.exitcode == 0:
@@ -764,6 +751,23 @@ def run_tests(options1, args, print_version):
     else:
         error("don't check new fails for incomplete suite of tests", 2)
         R = 0
+     
+    test_OS = R[4].split()[2]
+    test_compiler =  R[4].split()[5]   
+
+    try:
+        for fname in compile_error_files:
+            common.ex_state.add_to_tt(fname, options.arch, opt, options.target, test_OS, test_compiler, 0, 1)
+
+        for fname in run_error_files:
+            common.ex_state.add_to_tt(fname, options.arch, opt, options.target, test_OS, test_compiler, 1, 0)
+
+        for fname in run_succeed_files:
+            common.ex_state.add_to_tt(fname, options.arch, opt, options.target, test_OS, test_compiler, 0, 0)
+
+    except:
+        print_debug("Exception in ex_state. Skipping...", s, run_tests_log)
+
 
     if options.time:
         print_debug("Elapsed time: " + elapsed_time + "\n", s, run_tests_log)

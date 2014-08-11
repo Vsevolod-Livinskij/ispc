@@ -230,21 +230,21 @@ class TestCase(object):
     the architecture (x86, x86-64 ...), compiler optimization (-O0, -O2 ...)
     and target (sse, avx ...). we also store the result of the test here.
     """
-    def __init__(self, arch, opt, target):
-        self.arch, self.opt, self.target = (arch, opt, target)
+    def __init__(self, arch, opt, target, OS, compiler):
+        self.arch, self.opt, self.target, self.OS, self.compiler = (arch, opt, target, OS, compiler)
         self.result = TestResult(-1, -1)
 
     def __repr__(self):
-        string = "%s %s %s: " % (self.arch, self.opt, self.target)
+        string = "%s %s %s %s %s: " % (self.arch, self.opt, self.target, self.OS, self.compiler)
         string = string + repr(self.result)
         return string
 
     def __hash__(self):
-        return hash(self.arch + self.opt + self.target)
+        return hash(self.arch + self.opt + self.target + self.OS + self.compiler)
 
     def __ne__(self, other):
         if isinstance(other, TestCase):
-            if hash(self.arch + self.opt + self.target) != hash(other):
+            if hash(self.arch + self.opt + self.target + self.OS + self.compiler) != hash(other):
                 return True
             return False
         raise RuntimeError("Wrong type for comparioson")
@@ -348,17 +348,17 @@ class TestTable(object):
         is a Test() object instance """
         self.table = {}
         self.broken = []
-
+    
     def set_broken(self, rev_name):
         if str(rev_name) not in self.broken:
             self.broken.append(str(rev_name))
 
-    def add_result(self, revision_name, test_name, arch, opt, target, runfailed, compfailed):
+    def add_result(self, revision_name, test_name, arch, opt, target, OS, compiler, runfailed, compfailed):
         revision_name = str(revision_name)
         if revision_name not in self.table:
             self.table[revision_name] = []
         
-        test_case = TestCase(arch, opt, target)
+        test_case = TestCase(arch, opt, target, OS, compiler)
         test_case.result = TestResult(runfailed, compfailed)
 
         for test in self.table[revision_name]:
@@ -434,8 +434,8 @@ class ExecutionStateGatherer(object):
         print "Switching revision to " + str(revision)
         self.revision = str(revision)
 
-    def add_to_tt(self, test_name, arch, opt, target, runfailed, compfailed):
-        self.tt.add_result(self.revision, test_name, arch, opt, target, runfailed, compfailed)
+    def add_to_tt(self, test_name, arch, opt, target, OS, compiler, runfailed, compfailed):
+        self.tt.add_result(self.revision, test_name, arch, opt, target, OS, compiler, runfailed, compfailed)
 
     def load_from_tt(self, tt):
         self.tt = tt

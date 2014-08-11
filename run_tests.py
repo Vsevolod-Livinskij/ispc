@@ -380,14 +380,6 @@ def file_check(compfails, runfails):
     f = open(test_states, 'r')
     f_lines = f.readlines()
     f.close()
-# Detect OS
-    if platform.system() == 'Windows' or 'CYGWIN_NT' in platform.system():
-        OS = "Windows"
-    else:
-        if platform.system() == 'Darwin':
-            OS = "Mac"
-        else:
-            OS = "Linux"
 # Detect opt_set
     if options.no_opt == True:
         opt = "-O0"
@@ -505,7 +497,15 @@ def run_tests(options1, args, print_version):
     options = options1
     global s
     s = options.silent
-    
+    global OS
+    if platform.system() == 'Windows' or 'CYGWIN_NT' in platform.system():
+        OS = "Windows"
+    else:
+        if platform.system() == 'Darwin':
+            OS = "Mac"
+        else:
+            OS = "Linux"
+   
     # prepare run_tests_log and fail_db file
     global run_tests_log
     if options.in_file:
@@ -624,14 +624,6 @@ def run_tests(options1, args, print_version):
         if not wrapexe_exists:
             error("missing the required launcher: %s \nAdd it to your $PATH\n" % options.wrapexe, 1)
         
-        if platform.system() == 'Windows' or 'CYGWIN_NT' in platform.system():
-            OS = "Windows"
-        else:
-            if platform.system() == 'Darwin':
-                OS = "Mac"
-            else:
-                OS = "Linux"
-
         if not (OS  == 'Linux'):
             error ("knc target supported only on Linux", 1)
     # if no specific test files are specified, run all of the tests in tests/,
@@ -731,13 +723,13 @@ def run_tests(options1, args, print_version):
 
     try:
         for fname in compile_error_files:
-            common.ex_state.add_to_tt(fname, options.arch, opt, options.target, 0, 1)
+            common.ex_state.add_to_tt(fname, options.arch, opt, options.target, OS, options.compiler_exe, 0, 1)
 
         for fname in run_error_files:
-            common.ex_state.add_to_tt(fname, options.arch, opt, options.target, 1, 0)
+            common.ex_state.add_to_tt(fname, options.arch, opt, options.target, OS, options.compiler_exe, 1, 0)
 
         for fname in run_succeed_files:
-            common.ex_state.add_to_tt(fname, options.arch, opt, options.target, 0, 0)
+            common.ex_state.add_to_tt(fname, options.arch, opt, options.target, OS, options.compiler_exe, 0, 0)
     
     except:
         print_debug("Exception in ex_state. Skipping...", s, run_tests_log)

@@ -72,6 +72,24 @@ def get_real_revision(revision):
         if entry[0] == 'Last Changed Rev':
             return int(entry[1])
 
+def get_list_of_real_revisions(start_rev, end_rev):
+    ret = []
+    start_rev = get_real_revision(start_rev)
+    end_rev = get_real_revision(end_rev)
+    svn_path = 'http://llvm.org/svn/llvm-project/llvm/trunk'
+    p = subprocess.Popen('svn log -r ' + str(start_rev) + ":" + str(end_rev) + ' ' + svn_path, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    (svninfo, err) = p.communicate()
+    if len(err) != 0: # In case of a failure
+        raise IOError(err)
+    
+    info_llvm = [re.split(' ', line) for line in re.split('\n', svninfo)]
+    for iterator in info_llvm:
+        for entry in range (0, len(iterator)):
+            matchObj = re.match("(^[r]([0-9]+))", iterator[entry])
+            if matchObj:
+                ret.append(matchObj.groups()[1])
+    return ret
+
 # load/save almost every object to a file (good for bug reproducing)
 def dump(fname, obj):
     import pickle
@@ -230,21 +248,22 @@ class TestCase(object):
     the architecture (x86, x86-64 ...), compiler optimization (-O0, -O2 ...)
     and target (sse, avx ...). we also store the result of the test here.
     """
-    def __init__(self, arch, opt, target, OS, compiler):
-        self.arch, self.opt, self.target, self.OS, self.compiler = (arch, opt, target, OS, compiler)
+    def __init__(self, arch, opt, target, OS, llvm_version, compiler):
+        self.arch, self.opt, self.target, self.OS, self.llvm_version, self.compiler = \
+        (arch, opt, target, OS, llvm_version, compiler)
         self.result = TestResult(-1, -1)
 
     def __repr__(self):
-        string = "%s %s %s %s %s: " % (self.arch, self.opt, self.target, self.OS, self.compiler)
+        string = "%s %s %s %s %s %s: " % (self.arch, self.opt, self.target, self.OS, self.llvm_version, self.compiler)
         string = string + repr(self.result)
         return string
 
     def __hash__(self):
-        return hash(self.arch + self.opt + self.target + self.OS + self.compiler)
+        return hash(self.arch + self.opt + self.target + self.OS + self.llvm_version + self.compiler)
 
     def __ne__(self, other):
         if isinstance(other, TestCase):
-            if hash(self.arch + self.opt + self.target + self.OS + self.compiler) != hash(other):
+            if hash(self.arch + self.opt + self.target + self.OS + self.llvm_version + self.compiler) != hash(other):
                 return True
             return False
         raise RuntimeError("Wrong type for comparioson")
@@ -353,12 +372,12 @@ class TestTable(object):
         if str(rev_name) not in self.broken:
             self.broken.append(str(rev_name))
 
-    def add_result(self, revision_name, test_name, arch, opt, target, OS, compiler, runfailed, compfailed):
+    def add_result(self, revision_name, test_name, arch, opt, target, OS, llvm_version, compiler, runfailed, compfailed):
         revision_name = str(revision_name)
         if revision_name not in self.table:
             self.table[revision_name] = []
         
-        test_case = TestCase(arch, opt, target, OS, compiler)
+        test_case = TestCase(arch, opt, target, OS, llvm_version, compiler)
         test_case.result = TestResult(runfailed, compfailed)
 
         for test in self.table[revision_name]:
@@ -434,8 +453,8 @@ class ExecutionStateGatherer(object):
         print "Switching revision to " + str(revision)
         self.revision = str(revision)
 
-    def add_to_tt(self, test_name, arch, opt, target, OS, compiler, runfailed, compfailed):
-        self.tt.add_result(self.revision, test_name, arch, opt, target, OS, compiler, runfailed, compfailed)
+    def add_to_tt(self, test_name, arch, opt, target, OS, llvm_version, compiler, runfailed, compfailed):
+        self.tt.add_result(self.revision, test_name, arch, opt, target, OS, llvm_version, compiler, runfailed, compfailed)
 
     def load_from_tt(self, tt):
         self.tt = tt

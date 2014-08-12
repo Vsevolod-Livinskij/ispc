@@ -720,7 +720,7 @@ def validation_run(only, only_targets, reference_branch, number, notify, update,
 
     # dumping gathered info to the file
     common.ex_state.dump(alloy_folder + "test_table.dump", common.ex_state.tt)
-
+    
     # sending e-mail with results
     if options.notify != "":
         send_mail(msg_additional_info, msg)
@@ -763,6 +763,17 @@ class RegressionTest(object):
     def __init__(self, r_left, r_rght, archs, opts, targets):
         revnum_left = common.get_real_revision(r_left)
         revnum_rght = common.get_real_revision(r_rght)
+        
+        unord_rev_list = []
+        for i in common.get_list_of_real_revisions(revnum_left, revnum_rght):
+            unord_rev_list.append(int(i))    
+        rev_list = []
+        for e in unord_rev_list:
+            if e not in rev_list:
+                rev_list.append(e)
+        rev_list = sorted(rev_list)
+        print "Real revisions:" 
+        print rev_list
 
         print_debug("Regression test started with revisions %d and %d (using real LLVM revisions)\n" % (revnum_left, revnum_rght), False, stability_log)
         self.REVISIONS_DB = common.ex_state.tt.table.keys() # revisions tested by this time
@@ -781,12 +792,14 @@ class RegressionTest(object):
             return
 
         regr_to_find = common.ex_state.tt.regression(revnum_left, revnum_rght)
-        self.test_between(revnum_left, revnum_rght, regr_to_find)
+        self.test_between(rev_list, 0, len(rev_list) - 1, regr_to_find)
 
-    def test_between(self, revnum_left, revnum_rght, regr_to_find):
+    def test_between(self, rev_list, lstnum_left, lstnum_rght, regr_to_find):
+        revnum_left = rev_list[lstnum_left]
+        revnum_rght = rev_list[lstnum_rght]
+        lstnum_midl = (lstnum_rght + lstnum_left + 1) / 2
+        revnum_midl = rev_list[lstnum_midl]
         print_debug("Testing between %d and %d:" % (revnum_left, revnum_rght), False, stability_log)
-        tried_midl = (revnum_rght + revnum_left) / 2
-        revnum_midl = common.get_real_revision(tried_midl)
         
         # list of archs/opts/targets to test to find regression 
         archs = regr_to_find.archs
@@ -832,8 +845,9 @@ class RegressionTest(object):
         regr_to_find_left = common.RegressionInfo(revnum_left, revnum_midl, left_tests)
         regr_to_find_rght = common.RegressionInfo(revnum_midl, revnum_rght, rght_tests)
 
-        self.test_between(revnum_left, revnum_midl, regr_to_find_left)
-        self.test_between(revnum_midl, revnum_rght, regr_to_find_rght)
+        
+        self.test_between(rev_list[lstnum_left:lstnum_midl], lstnum_left, lstnum_midl, regr_to_find_left)
+        self.test_between(rev_list[lstnum_midl - 1:lstnum_rght + 1], lstnum_midl, lstnum_rght, regr_to_find_rght)
 
 
     def refresh_esg(self, revnum, archs, opts, targets):
@@ -881,6 +895,19 @@ class RegressionTest(object):
         common.ex_state.dump("regression.dump", common.ex_state.tt)
         return True
 
+def only_options_validator(only_opts):
+    if only_opts != "":
+        test_only_r = " 3.2 3.3 3.4 3.5 trunk current build stability performance x86 x86-64 -O0 -O2 native R "
+        test_only = re.split('R | ', only_opts)
+        for iterator in test_only:
+            if iterator[0] != "R":
+                if not (" " + iterator + " " in test_only_r):
+                    error("unknown option for only: " + iterator, 1)
+            else:
+                rev_pattern = re.compile("^[R]([0-9]+)$")
+                if rev_pattern.match(iterator) == None:
+                    error("unknown option for only: " + iterator, 1)    
+    return True
 
 def Main():
     global current_OS
@@ -913,17 +940,10 @@ def Main():
     if options.notify != "":
         if os.environ.get("SMTP_ISPC") == None:
             error("you have no SMTP_ISPC in your environment for option notify", 1)
-    if options.only != "":
-        test_only_r = " 3.2 3.3 3.4 3.5 trunk current build stability performance x86 x86-64 -O0 -O2 native R "
-        test_only = re.split('R | ', options.only)
-        for iterator in test_only:
-            if iterator[0] != "R":
-                if not (" " + iterator + " " in test_only_r):
-                    error("unknown option for only: " + iterator, 1)
-            else:
-                rev_pattern = re.compile("^[R]([0-9]+)$")
-                if rev_pattern.match(iterator) == None:
-                    error("unknown option for only: " + iterator, 1)
+    
+    only_options_validator(options.only)
+    only_options_validator(options.regr_only)
+    
     if current_OS == "Windows":
         if options.debug == True or options.selfbuild == True or options.tarball != "":
             error("Debug, selfbuild and tarball options are unsupported on windows", 1)
@@ -956,21 +976,32 @@ def Main():
         if options.regression_test:
             # TODO: lets translate standard revision names to revision numbers! ('3.4' -> R123456)
             # this class does all job here
-
-
-            # this is a convenience quick fix:
-            qf_settig = options.qf.split(' ')
-            if len(qf_settig) != 3:
-                print_debug("Invalid '--quick-fix' option with '-s'. qf = " + options.qf + "\n", False, "")
-                raise
-
-            #targets = ['sse4-i32x8']
-            #opts    = ['-O2 -O0']
-            #archs   = ['x86']
-
-            targets = [qf_settig[0]]
-            opts    = [qf_settig[1]]
-            archs   = [qf_settig[2]]
+            
+            targets = options.regr_only_targets.split()
+            opts    = []
+            archs   = []
+           
+            if "-O2" in options.regr_only:
+                opts.append("-O2")
+                options.regr_only = options.regr_only.replace("-O2", "")
+            if "-O0" in options.regr_only:
+                opts.append("-O0")
+                options.regr_only = options.regr_only.replace("-O0", "")
+            if "x86" in options.regr_only and not ("x86-64" in options.regr_only):
+                archs.append("x86")
+                options.regr_only = options.regr_only.replace("x86", "")
+            if "x86-64" in options.regr_only:
+                archs.append("x86-64")
+                options.regr_only = options.regr_only.replace("x86-64", "")        
+                       
+            if not (options.regr_only.isspace() or len(options.regr_only) == 0):
+                error("unknown option for only: " + options.regr_only, 1)
+ 
+            #set default value
+            if opts == []:
+                opts.append("-O2")
+            if archs == []:
+                archs.append("x86-64")
 
             left_rev = get_rev_by_name(options.start_rev)
             rght_rev = get_rev_by_name(options.end_rev)
@@ -1101,8 +1132,11 @@ if __name__ == '__main__':
         help='start revision for search', default="")
     regr_group.add_option('--end-rev', dest='end_rev',
         help='end revision for search', default="")
-    regr_group.add_option('--quick-fix', dest='qf',
-        help='set like that: qf=/"sse4-i16x8 -O0 x86-64/"', default="")
+    regr_group.add_option('--regr-only', dest='regr_only',
+        help='set like that: --regr-only=/"-O0 x86-64/"', default="-O0 x86-64")
+    regr_group.add_option('--regr-only-targets', dest='regr_only_targets',
+        help='set list of targets to test. Possible values - all subnames of targets.',
+        default="sse4")
     parser.add_option_group(regr_group)
     # options for activity "setup PATHS"
     setup_group = OptionGroup(parser, "Options for setup",

@@ -46,27 +46,45 @@
 #include <assert.h>
 #include <string.h>
 #include <stdio.h>
+#define __STDC_LIMIT_MACROS // enable intN_t limits from stdint.h
 #include <stdint.h>
 #ifdef ISPC_IS_LINUX
 #include <malloc.h>
 #endif
 
-extern "C" {
-    extern int width();
-    extern void f_v(float *result);
-    extern void f_f(float *result, float *a);
-    extern void f_fu(float *result, float *a, float b);
-    extern void f_fi(float *result, float *a, int *b);
-    extern void f_du(float *result, double *a, double b);
-    extern void f_duf(float *result, double *a, float b);
-    extern void f_di(float *result, double *a, int *b);
-    extern void result(float *val);
+#if (CPP_SIG == 0)
+    extern "C" {
+        extern int width();
+        extern void f_v(float *result);
+        extern void f_f(float *result, float *a);
+        extern void f_fu(float *result, float *a, float b);
+        extern void f_fi(float *result, float *a, int *b);
+        extern void f_du(float *result, double *a, double b);
+        extern void f_duf(float *result, double *a, float b);
+        extern void f_di(float *result, double *a, int *b);
+        extern void result(float *val);
+
+        void ISPCLaunch(void **handlePtr, void *f, void *d, int,int,int);
+        void ISPCSync(void *handle);
+        void *ISPCAlloc(void **handlePtr, int64_t size, int32_t alignment);
+    }
+#else
+    int width();
+    void f_v(float *result);
+    void f_f(float *result, float *a);
+    void f_fu(float *result, float *a, float b);
+    void f_fi(float *result, float *a, int *b);
+    void f_du(float *result, double *a, double b);
+    void f_duf(float *result, double *a, float b);
+    void f_di(float *result, double *a, int *b);
+    void result(float *val);
 
     void ISPCLaunch(void **handlePtr, void *f, void *d, int,int,int);
     void ISPCSync(void *handle);
     void *ISPCAlloc(void **handlePtr, int64_t size, int32_t alignment);
-}
- 
+#endif
+
+
 void ISPCLaunch(void **handle, void *f, void *d, int count0, int count1, int count2) {
     *handle = (void *)0xdeadbeef;
     typedef void (*TaskFuncType)(void *, int, int, int, int, int, int, int, int, int, int);
@@ -111,7 +129,7 @@ void *ISPCAlloc(void **handle, int64_t size, int32_t alignment) {
 int main(int argc, char *argv[]) {
     int w = width();
     assert(w <= 64);
-
+    
     float returned_result[64] ALIGN;
     float vfloat[64] ALIGN;
     double vdouble[64] ALIGN;
@@ -125,7 +143,7 @@ int main(int argc, char *argv[]) {
         vint[i] = 2*(i+1);
         vint2[i] = i+5;
     }
-
+    
     float b = 5.;
 
 #if (TEST_SIG == 0)

@@ -47,6 +47,7 @@ def update_progress(fn, total_tests_arg, counter, max_test_length_arg):
         sys.stdout.flush()
 
 def run_command(cmd):
+    print "COMMAND:" +  cmd
     if options.verbose:
         print_debug("Running: %s\n" % cmd, s, run_tests_log)
 
@@ -158,7 +159,7 @@ def run_test(testname):
     # ispc_exe_rel is a relative path to ispc
     filename = add_prefix(testname)
     ispc_exe_rel = add_prefix(ispc_exe)
-
+    print "FILENAME:" + filename
     # is this a test to make sure an error is issued?
     want_error = (filename.find("tests_errors") != -1)
     if want_error == True:
@@ -214,6 +215,11 @@ def run_test(testname):
             return (1, 0)
         else:
             global is_generic_target
+            test_xeon_header = (filename.find("tests_xeon") != -1)
+            if test_xeon_header == True: # needed for compilation for test static, because icpc doesn't support keyword "export"
+                cpp_sig = 1
+            else:
+                cpp_sig = 0
             if is_windows:
                 if is_generic_target:
                     obj_name = "%s.cpp" % os.path.basename(filename)
@@ -221,8 +227,8 @@ def run_test(testname):
                     obj_name = "%s.obj" % os.path.basename(filename)
                 exe_name = "%s.exe" % os.path.basename(filename)
 
-                cc_cmd = "%s /I. /Zi /nologo /DTEST_SIG=%d %s %s /Fe%s" % \
-                         (options.compiler_exe, match, add_prefix("test_static.cpp"), obj_name, exe_name)
+                cc_cmd = "%s /I. /Zi /nologo /DTEST_SIG=%d /CPP_SIG=%d %s %s /Fe%s" % \
+                         (options.compiler_exe, match, cpp_sig, add_prefix("test_static.cpp"), obj_name, exe_name)
                 if should_fail:
                     cc_cmd += " /DEXPECT_FAILURE"
             else:
@@ -253,12 +259,16 @@ def run_test(testname):
                     gcc_isa = '-mmic'
 
                 if (options.target == "knc"):
-                    cc_cmd = "%s -O2 -I. %s %s test_static.cpp -DTEST_SIG=%d %s -o %s" % \
-                         (options.compiler_exe, gcc_arch, "-mmic", match, obj_name, exe_name)
+                    if test_xeon_header == True: # tests for xeon header file
+                        cc_cmd = "%s -O2 -I. -Iexamples/intrinsics/ %s %s test_static.cpp -DTEST_SIG=%d -DCPP_SIG=%d %s -o %s" % \
+                             (options.compiler_exe, gcc_arch, "-mmic", match, cpp_sig, filename, exe_name)
+                    else: 
+                        cc_cmd = "%s -O2 -I. %s %s test_static.cpp -DTEST_SIG=%d -DCPP_SIG=%d %s -o %s" % \
+                             (options.compiler_exe, gcc_arch, "-mmic", match, cpp_sig, obj_name, exe_name)
                 else:
-                    cc_cmd = "%s -O2 -I. %s %s test_static.cpp -DTEST_SIG=%d %s -o %s" % \
-                         (options.compiler_exe, gcc_arch, gcc_isa, match, obj_name, exe_name)                    
-
+                    cc_cmd = "%s -O2 -I. %s %s test_static.cpp -DTEST_SIG=%d -DCPP_SIG=%d %s -o %s" % \
+                         (options.compiler_exe, gcc_arch, gcc_isa, match, cpp_sig, obj_name, exe_name)                    
+                print "EXE_COMMAND:" + cc_cmd
                 if platform.system() == 'Darwin':
                     cc_cmd += ' -Wl,-no_pie'
                 if should_fail:
@@ -273,21 +283,28 @@ def run_test(testname):
                 ispc_cmd += " -O0" 
             if is_generic_target:
                 ispc_cmd += " --emit-c++ --c++-include-file=%s" % add_prefix(options.include_file)
-             
+        print "ISPC:" + ispc_cmd     
         # compile the ispc code, make the executable, and run it...
-        (compile_error, run_error) = run_cmds([ispc_cmd, cc_cmd], 
-                                              options.wrapexe + " " + exe_name, \
-                                              testname, should_fail)
+        if test_xeon_header == False: 
+            (compile_error, run_error) = run_cmds([ispc_cmd, cc_cmd], 
+                                                  options.wrapexe + " " + exe_name, \
+                                                  testname, should_fail)
+        else: # tests for xeon header file
+            (compile_error, run_error) = run_cmds([cc_cmd],
+                                                  options.wrapexe + " " + exe_name, \
+                                                  testname, should_fail)
 
         # clean up after running the test
         try:
             if not options.save_bin:
                 if not run_error:
+                    print "UNLINK:" + exe_name
                     os.unlink(exe_name)
                     if is_windows:
                         basename = os.path.basename(filename)
                         os.unlink("%s.pdb" % basename)
                         os.unlink("%s.ilk" % basename)
+                print "UNLINK:" + obj_name
                 os.unlink(obj_name)
         except:
             None
@@ -658,6 +675,8 @@ def run_tests(options1, args, print_version):
     if len(args) == 0:
         files = glob.glob(ispc_root + os.sep + "tests" + os.sep + "*ispc") + \
             glob.glob(ispc_root + os.sep + "tests_errors" + os.sep + "*ispc")
+        if (options.target == "knc"):
+            files += glob.glob(ispc_root + os.sep + "tests_xeon" + os.sep + "*cpp")
     else:
         if is_windows:
             argfiles = [ ]
@@ -670,7 +689,7 @@ def run_tests(options1, args, print_version):
         
         files = [ ]
         for f in argfiles:
-            if os.path.splitext(string.lower(f))[1] != ".ispc":
+            if os.path.splitext(string.lower(f))[1] != ".ispc" and os.path.splitext(string.lower(f))[1] != ".cpp":
                 error("Ignoring file %s, which doesn't have an .ispc extension.\n" % f, 2)
             else:
                 files += [ f ]

@@ -7,6 +7,8 @@ export void f_f(uniform float RET[], uniform float aFOO[]) {
     prefetch_l2(aFOO);
     prefetch_l3(aFOO);
     prefetch_nt(aFOO);
+    float * varying p;
+    prefetch_l2(p);
     float a = aFOO[programIndex]; 
     float b = 0.; b = a; 
     RET[programIndex] = a+b; 

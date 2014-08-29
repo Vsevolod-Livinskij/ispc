@@ -1584,6 +1584,23 @@ define void @__prefetch_read_uniform_nt(i8 *) alwaysinline {
   call void @llvm.prefetch(i8 * %0, i32 0, i32 0, i32 1)
   ret void
 }
+
+
+define void @__prefetch_read_varying_1(i8 * %base, i32 %scale, <WIDTH x i32> %offsets, <WIDTH x MASK> %mask) alwaysinline {
+  ret void
+}
+
+define void @__prefetch_read_varying_2(i8 * %base, i32 %scale, <WIDTH x i32> %offsets, <WIDTH x MASK> %mask) alwaysinline {
+  ret void
+}
+
+define void @__prefetch_read_varying_3(i8 * %base, i32 %scale, <WIDTH x i32> %offsets, <WIDTH x MASK> %mask) alwaysinline {
+  ret void
+}
+
+define void @__prefetch_read_varying_nt(i8 * %base, i32 %scale, <WIDTH x i32> %offsets, <WIDTH x MASK> %mask) alwaysinline {
+  ret void
+}
 ')
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;

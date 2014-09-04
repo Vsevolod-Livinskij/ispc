@@ -2782,6 +2782,54 @@ public:
 
 char ImprovePrefetchPass::ID = 0;
 
+static bool
+lPrefetchImprove(llvm::CallInst *callInst) {
+    struct PrefInfo {
+        PrefInfo(const char *initPrefName, const char *funcPrefName)
+            {
+            func = m->module->getFunction(initPrefName);
+            callFunc = m->module->getFunction(funcPrefName);
+        }
+        llvm::Function *func;
+        llvm::Function *callFunc;
+    };
+
+    PrefInfo prefFuncs[] = {
+        PrefInfo("__pseudo_prefetch_read_varying_2",
+                 g->target->hasVecPrefetch() ? "__prefetch_read_varying_hardware_2" :
+                                               "__prefetch_read_varying_software_2"),
+    };
+
+    int numPrefFuncs = sizeof(prefFuncs) / sizeof(prefFuncs[0]);
+    for (int i = 0; i < numPrefFuncs; ++i)
+        Assert(prefFuncs[i].func != NULL && prefFuncs[i].callFunc != NULL);
+
+    PrefInfo *info = NULL;
+    for (int i = 0; i < numPrefFuncs; ++i)
+        if (prefFuncs[i].func != NULL &&
+            callInst->getCalledFunction() == prefFuncs[i].func) {
+            info = &prefFuncs[i];
+            break;
+        }
+    if (info == NULL)
+        return false;
+
+    // Try to transform the array of pointers to a single base pointer
+    // and an array of int32 offsets.  (All the hard work is done by
+    // lGetBasePtrAndOffsets).
+    llvm::Value *ptrs = callInst->getArgOperand(0);
+    llvm::Value *offsetVector = NULL;
+    llvm::Value *basePtr = lGetBasePtrAndOffsets(ptrs, &offsetVector,
+                                                 callInst);
+
+    if (basePtr == NULL || offsetVector == NULL)
+        // It's actually a fully general gather/scatter with a varying
+        // set of base pointers, so leave it as is and continune onward
+        // to the next instruction...
+        return false;
+    else
+        return true;
+}
 
 ///////////////////////////////////////////////////////////////////////////
 // MaskedStoreOptPass

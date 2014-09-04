@@ -370,6 +370,8 @@ declare void @__prefetch_read_uniform_2(i8 * nocapture) nounwind
 declare void @__prefetch_read_uniform_3(i8 * nocapture) nounwind 
 declare void @__prefetch_read_uniform_nt(i8 * nocapture) nounwind 
 
+declare void @__pseudo_prefetch_read_varying_2(<WIDTH x i64>, <WIDTH x MASK>) nounwind readonly
+
 declare void @__prefetch_read_varying_1(i8 * nocapture, i32, <WIDTH x i32> %offsets, <WIDTH x i1>) nounwind
 declare void @__prefetch_read_varying_2(i8 * nocapture, i32, <WIDTH x i32> %offsets, <WIDTH x i1>) nounwind
 declare void @__prefetch_read_varying_3(i8 * nocapture, i32, <WIDTH x i32> %offsets, <WIDTH x i1>) nounwind

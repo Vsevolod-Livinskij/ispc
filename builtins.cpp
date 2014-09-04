@@ -504,7 +504,7 @@ lSetInternalFunctions(llvm::Module *module) {
         "__prefetch_read_uniform_3",
         "__prefetch_read_uniform_nt",
         "__prefetch_read_varying_1",
-        "__prefetch_read_varying_2",
+        "__pseudo_prefetch_read_varying_2",
         "__prefetch_read_varying_3",
         "__prefetch_read_varying_nt",
         "__psubs_vi8",

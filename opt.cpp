@@ -130,6 +130,8 @@ static llvm::Pass *CreateReplaceStdlibShiftPass();
 
 static llvm::Pass *CreateFixBooleanSelectPass();
 
+static llvm::Pass *ImprovePrefetchPass();
+
 #define DEBUG_START_PASS(NAME)                                 \
     if (g->debugPrint &&                                       \
         (getenv("FUNC") == NULL ||                             \
@@ -2759,6 +2761,26 @@ lGSToLoadStore(llvm::CallInst *callInst) {
         return false;
     }
 }
+
+///////////////////////////////////////////////////////////////////////////
+// ImprovePrefetchPass
+/** When varying prefetch is used, it generates an array of vector-width 
+    pointers to represent the set of addresses to prefetch from.
+    This optimization detects cases when the base pointer is a uniform pointer
+    or when the indexing is into an array that can be converted into prefetch 
+    from a single base pointer and an array of offsets.
+*/
+
+class ImprovePrefetchPass : public llvm::BasicBlockPass {
+public:
+    static char ID;
+    ImprovePrefetchPass() : BasicBlockPass(ID) { }
+
+    const char *getPassName() const { return "Improve Prefetch"; }
+    bool runOnBasicBlock(llvm::BasicBlock &BB);
+};
+
+char ImprovePrefetchPass::ID = 0;
 
 
 ///////////////////////////////////////////////////////////////////////////

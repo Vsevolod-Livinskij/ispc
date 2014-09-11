@@ -2881,6 +2881,10 @@ lPrefetchImprove(llvm::CallInst *callInst) {
         lCopyMetadata(newCall, callInst);
         llvm::ReplaceInstWithInst(callInst, newCall);
     }
+    else {
+        callInst->setCalledFunction(info->swFunc);
+    }
+
     return true;
 }
 

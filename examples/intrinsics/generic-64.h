@@ -1757,17 +1757,18 @@ static FORCEINLINE void __prefetch_read_uniform_3(unsigned char *) {
 static FORCEINLINE void __prefetch_read_uniform_nt(unsigned char *) {
 }
 
-static FORCEINLINE void __prefetch_read_varying_1(uint8_t *base, uint32_t scale, __vec16_i32 offsets, __vec16_i1 mask) {
+#define PREFETCH_READ_VARYING(LEVEL_FUNC, CACHE_LEVEL)                                                      \
+static FORCEINLINE void __prefetch_read_varying_hardware_##LEVEL_FUNC(uint8_t *base, uint32_t scale,        \
+                                                             __vec16_i32 offsets, __vec16_i1 mask) {        \
+}                                                                                                           \
+                                                                                                            \
+static FORCEINLINE void __prefetch_read_varying_software_##LEVEL_FUNC(__vec16_i64 addr, __vec16_i1 mask) {  \
 }
 
-static FORCEINLINE void __prefetch_read_varying_2(uint8_t *base, uint32_t scale, __vec16_i32 offsets, __vec16_i1 mask) {
-}
-
-static FORCEINLINE void __prefetch_read_varying_3(uint8_t *base, uint32_t scale, __vec16_i32 offsets, __vec16_i1 mask) {
-}
-
-static FORCEINLINE void __prefetch_read_varying_nt(uint8_t *base, uint32_t scale, __vec16_i32 offsets, __vec16_i1 mask) {
-}
+PREFETCH_READ_VARYING(1)
+PREFETCH_READ_VARYING(2)
+PREFETCH_READ_VARYING(3)
+PREFETCH_READ_VARYING(nt)
 
 ///////////////////////////////////////////////////////////////////////////
 // atomics

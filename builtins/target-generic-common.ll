@@ -370,12 +370,22 @@ declare void @__prefetch_read_uniform_2(i8 * nocapture) nounwind
 declare void @__prefetch_read_uniform_3(i8 * nocapture) nounwind 
 declare void @__prefetch_read_uniform_nt(i8 * nocapture) nounwind 
 
-declare void @__pseudo_prefetch_read_varying_2(<WIDTH x i64>, <WIDTH x MASK>) nounwind readonly
+declare void @__pseudo_prefetch_read_varying_1(<WIDTH x i64>, <WIDTH x MASK>) nounwind
+declare void @__prefetch_read_varying_software_1(<WIDTH x i64> %addr, <WIDTH x MASK> %mask) nounwind
+declare void @__prefetch_read_varying_hardware_1(i8 * %base, i32 %scale, <WIDTH x i32> %offsets, <WIDTH x MASK> %mask) nounwind
 
-declare void @__prefetch_read_varying_1(i8 * nocapture, i32, <WIDTH x i32> %offsets, <WIDTH x i1>) nounwind
-declare void @__prefetch_read_varying_2(i8 * nocapture, i32, <WIDTH x i32> %offsets, <WIDTH x i1>) nounwind
-declare void @__prefetch_read_varying_3(i8 * nocapture, i32, <WIDTH x i32> %offsets, <WIDTH x i1>) nounwind
-declare void @__prefetch_read_varying_nt(i8 * nocapture, i32, <WIDTH x i32> %offsets, <WIDTH x i1>) nounwind
+declare void @__pseudo_prefetch_read_varying_2(<WIDTH x i64>, <WIDTH x MASK>) nounwind
+declare void @__prefetch_read_varying_software_2(<WIDTH x i64> %addr, <WIDTH x MASK> %mask) nounwind
+declare void @__prefetch_read_varying_hardware_2(i8 * %base, i32 %scale, <WIDTH x i32> %offsets, <WIDTH x MASK> %mask) nounwind
+
+declare void @__pseudo_prefetch_read_varying_3(<WIDTH x i64>, <WIDTH x MASK>) nounwind
+declare void @__prefetch_read_varying_software_3(<WIDTH x i64> %addr, <WIDTH x MASK> %mask) nounwind
+declare void @__prefetch_read_varying_hardware_3(i8 * %base, i32 %scale, <WIDTH x i32> %offsets, <WIDTH x MASK> %mask) nounwind
+
+declare void @__pseudo_prefetch_read_varying_nt(<WIDTH x i64>, <WIDTH x MASK>) nounwind
+declare void @__prefetch_read_varying_software_nt(<WIDTH x i64> %addr, <WIDTH x MASK> %mask) nounwind
+declare void @__prefetch_read_varying_hardware_nt(i8 * %base, i32 %scale, <WIDTH x i32> %offsets, <WIDTH x MASK> %mask) nounwind
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; int8/int16 builtins
 

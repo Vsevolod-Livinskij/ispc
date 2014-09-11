@@ -130,7 +130,7 @@ static llvm::Pass *CreateReplaceStdlibShiftPass();
 
 static llvm::Pass *CreateFixBooleanSelectPass();
 
-static llvm::Pass *ImprovePrefetchPass();
+static llvm::Pass *CreateImprovePrefetchPass();
 
 #define DEBUG_START_PASS(NAME)                                 \
     if (g->debugPrint &&                                       \
@@ -500,6 +500,7 @@ Optimize(llvm::Module *module, int optLevel) {
             optPM.add(CreateReplacePseudoMemoryOpsPass());
 
         optPM.add(CreateIntrinsicsOptPass(), 102);
+        optPM.add(CreateImprovePrefetchPass());
         optPM.add(CreateIsCompileTimeConstantPass(true));
         optPM.add(llvm::createFunctionInliningPass());
         optPM.add(CreateMakeInternalFuncsStaticPass());
@@ -2785,24 +2786,37 @@ char ImprovePrefetchPass::ID = 0;
 static bool
 lPrefetchImprove(llvm::CallInst *callInst) {
     struct PrefInfo {
-        PrefInfo(const char *initPrefName, const char *funcPrefName)
-            {
+        PrefInfo(const char *initPrefName, const char *softwarePrefName, const char *hardwarePrefName)
+        {
             func = m->module->getFunction(initPrefName);
-            callFunc = m->module->getFunction(funcPrefName);
+            swFunc = m->module->getFunction(softwarePrefName);
+            hwFunc = m->module->getFunction(hardwarePrefName);
         }
         llvm::Function *func;
-        llvm::Function *callFunc;
+        llvm::Function *swFunc, *hwFunc;
     };
 
     PrefInfo prefFuncs[] = {
+        PrefInfo("__pseudo_prefetch_read_varying_1",
+                 "__prefetch_read_varying_software_1",
+                 "__prefetch_read_varying_hardware_1"),
         PrefInfo("__pseudo_prefetch_read_varying_2",
-                 g->target->hasVecPrefetch() ? "__prefetch_read_varying_hardware_2" :
-                                               "__prefetch_read_varying_software_2"),
+                 "__prefetch_read_varying_software_2",
+                 "__prefetch_read_varying_hardware_2"),
+        PrefInfo("__pseudo_prefetch_read_varying_3",
+                 "__prefetch_read_varying_software_3",
+                 "__prefetch_read_varying_hardware_3"),
+        PrefInfo("__pseudo_prefetch_read_varying_nt",
+                 "__prefetch_read_varying_software_nt",
+                 "__prefetch_read_varying_hardware_nt"),
     };
 
     int numPrefFuncs = sizeof(prefFuncs) / sizeof(prefFuncs[0]);
-    for (int i = 0; i < numPrefFuncs; ++i)
-        Assert(prefFuncs[i].func != NULL && prefFuncs[i].callFunc != NULL);
+    for (int i = 0; i < numPrefFuncs; ++i) {
+        Assert(prefFuncs[i].func != NULL);
+        Assert(prefFuncs[i].swFunc != NULL);
+        Assert(prefFuncs[i].hwFunc != NULL);
+    }
 
     PrefInfo *info = NULL;
     for (int i = 0; i < numPrefFuncs; ++i)
@@ -2822,13 +2836,83 @@ lPrefetchImprove(llvm::CallInst *callInst) {
     llvm::Value *basePtr = lGetBasePtrAndOffsets(ptrs, &offsetVector,
                                                  callInst);
 
-    if (basePtr == NULL || offsetVector == NULL)
-        // It's actually a fully general gather/scatter with a varying
+    if (basePtr == NULL || offsetVector == NULL) {
+        // It's actually a fully general prefetch with a varying
         // set of base pointers, so leave it as is and continune onward
         // to the next instruction...
+        callInst->setCalledFunction(info->swFunc);
         return false;
-    else
-        return true;
+    }
+
+    // Cast the base pointer to a void *, since that's what the
+    // __pseudo_*_base_offsets_* functions want.
+    basePtr = new llvm::IntToPtrInst(basePtr, LLVMTypes::VoidPointerType,
+                                     LLVMGetName(basePtr, "_2void"), callInst);
+    lCopyMetadata(basePtr, callInst);
+
+    llvm::Function *prefCallFunc = info->swFunc;
+
+    if (g->target->hasVecPrefetch()) {
+        // See if the offsets are scaled by 2, 4, or 8.  If so,
+        // extract that scale factor and rewrite the offsets to remove
+        // it.
+        llvm::Value *offsetScale = lExtractOffsetVector248Scale(&offsetVector);
+
+        // If we're doing 32-bit addressing on a 64-bit target, here we
+        // will see if we can call one of the 32-bit variants of the pseudo
+        // prefetch function.
+        if (g->opt.force32BitAddressing &&
+            lOffsets32BitSafe(&offsetVector, callInst)) {
+            prefCallFunc = info->hwFunc;
+        }
+
+        llvm::Value *mask = callInst->getArgOperand(1);
+
+        // Generate a new function call to the next pseudo gather
+        // base+offsets instruction.  Note that we're passing a NULL
+        // llvm::Instruction to llvm::CallInst::Create; this means that
+        // the instruction isn't inserted into a basic block and that
+        // way we can then call ReplaceInstWithInst().
+        llvm::Instruction *newCall =
+            lCallInst(prefCallFunc, basePtr, offsetScale, offsetVector,
+                      mask, callInst->getName().str().c_str(),
+                      NULL);
+        lCopyMetadata(newCall, callInst);
+        llvm::ReplaceInstWithInst(callInst, newCall);
+    }
+    return true;
+}
+
+bool
+ImprovePrefetchPass::runOnBasicBlock(llvm::BasicBlock &bb) {
+    DEBUG_START_PASS("ImprovePrefetch");
+
+    bool modifiedAny = false;
+ restart:
+    // Iterate through all of the instructions in the basic block.
+    for (llvm::BasicBlock::iterator iter = bb.begin(), e = bb.end(); iter != e; ++iter) {
+        llvm::CallInst *callInst = llvm::dyn_cast<llvm::CallInst>(&*iter);
+        // If we don't have a call to one of the
+        // __pseudo_prefetch functions, then just go on to the
+        // next instruction.
+        if (callInst == NULL ||
+            callInst->getCalledFunction() == NULL)
+            continue;
+
+        if (lPrefetchImprove(callInst)) {
+            modifiedAny = true;
+            goto restart;
+        }
+    }
+
+    DEBUG_END_PASS("ImproveMemoryOps");
+
+    return modifiedAny;
+}
+
+static llvm::Pass *
+CreateImprovePrefetchPass() {
+    return new ImprovePrefetchPass;
 }
 
 ///////////////////////////////////////////////////////////////////////////

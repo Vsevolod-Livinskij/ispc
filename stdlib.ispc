@@ -820,8 +820,7 @@ static inline void prefetch_nt(const void * uniform ptr) {
 }
 
 static inline void prefetch_l1(const void * varying ptr) {
-    varying int32 offsets = (int32) ptr;
-    __prefetch_read_varying_1(0, 1, offsets, (UIntMaskType)__mask);
+    __pseudo_prefetch_read_varying_1((int64)ptr, (IntMaskType)__mask); 
 }
 
 static inline void prefetch_l2(const void * varying ptr) {
@@ -829,13 +828,11 @@ static inline void prefetch_l2(const void * varying ptr) {
 }
 
 static inline void prefetch_l3(const void * varying ptr) {
-    varying int32 offsets = (int32) ptr;
-    __prefetch_read_varying_3(0, 1, offsets, (UIntMaskType)__mask);
+    __pseudo_prefetch_read_varying_3((int64)ptr, (IntMaskType)__mask);
 }
 
 static inline void prefetch_nt(const void * varying ptr) {
-    varying int32 offsets = (int32) ptr;
-    __prefetch_read_varying_nt(0, 1, offsets, (UIntMaskType)__mask);
+    __pseudo_prefetch_read_varying_nt((int64)ptr, (IntMaskType)__mask);
 }
 
 ///////////////////////////////////////////////////////////////////////////

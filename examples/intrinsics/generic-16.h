@@ -1540,7 +1540,7 @@ static FORCEINLINE void __prefetch_read_uniform_3(unsigned char *) {
 static FORCEINLINE void __prefetch_read_uniform_nt(unsigned char *) {
 }
 
-#define PREFETCH_READ_VARYING(LEVEL_FUNC, CACHE_LEVEL)                                                      \
+#define PREFETCH_READ_VARYING(LEVEL_FUNC)                                                                   \
 static FORCEINLINE void __prefetch_read_varying_hardware_##LEVEL_FUNC(uint8_t *base, uint32_t scale,        \
                                                              __vec16_i32 offsets, __vec16_i1 mask) {        \
 }                                                                                                           \

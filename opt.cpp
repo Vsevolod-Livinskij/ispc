@@ -519,7 +519,8 @@ Optimize(llvm::Module *module, int optLevel) {
         llvm::initializeInstrumentation(*registry);
         llvm::initializeTarget(*registry);
 
-        optPM.add(llvm::createGlobalDCEPass(), 185);
+        optPM.add(CreateImprovePrefetchPass(), 185);
+        optPM.add(llvm::createGlobalDCEPass());
 
         // Setup to use LLVM default AliasAnalysis
         // Ideally, we want call:
@@ -530,7 +531,7 @@ Optimize(llvm::Module *module, int optLevel) {
         // so we explicitly enable them here.
         // Need to keep sync with future LLVM change
         // An alternative is to call populateFunctionPassManager()
-        optPM.add(llvm::createTypeBasedAliasAnalysisPass(), 190);
+        optPM.add(llvm::createTypeBasedAliasAnalysisPass(), 191);
         optPM.add(llvm::createBasicAliasAnalysisPass());
         optPM.add(llvm::createCFGSimplificationPass());
         // Here clang has an experimental pass SROAPass instead of
@@ -541,7 +542,7 @@ Optimize(llvm::Module *module, int optLevel) {
 
         // Early optimizations to try to reduce the total amount of code to
         // work with if we can
-        optPM.add(llvm::createReassociatePass(), 200);
+        optPM.add(llvm::createReassociatePass(), 201);
         optPM.add(llvm::createConstantPropagationPass());
         optPM.add(llvm::createDeadInstEliminationPass());
         optPM.add(llvm::createCFGSimplificationPass());
@@ -552,14 +553,14 @@ Optimize(llvm::Module *module, int optLevel) {
 
         if (g->opt.disableGatherScatterOptimizations == false &&
             g->target->getVectorWidth() > 1) {
-            optPM.add(llvm::createInstructionCombiningPass(), 210);
+            optPM.add(llvm::createInstructionCombiningPass(), 211);
             optPM.add(CreateImproveMemoryOpsPass());
         }
         if (!g->opt.disableMaskAllOnOptimizations) {
-            optPM.add(CreateIntrinsicsOptPass(), 215);
+            optPM.add(CreateIntrinsicsOptPass(), 216);
             optPM.add(CreateInstructionSimplifyPass());
         }
-        optPM.add(llvm::createDeadInstEliminationPass(), 220);
+        optPM.add(llvm::createDeadInstEliminationPass(), 221);
 
         // Max struct size threshold for scalar replacement is
         //    1) 4 fields (r,g,b,w)
@@ -575,8 +576,8 @@ Optimize(llvm::Module *module, int optLevel) {
         optPM.add(llvm::createGlobalOptimizerPass());
         optPM.add(llvm::createReassociatePass());
         optPM.add(llvm::createIPConstantPropagationPass());
-        optPM.add(CreateReplaceStdlibShiftPass(),229);
-        optPM.add(llvm::createDeadArgEliminationPass(),230);
+        optPM.add(CreateReplaceStdlibShiftPass(),230);
+        optPM.add(llvm::createDeadArgEliminationPass(),231);
         optPM.add(llvm::createInstructionCombiningPass());
         optPM.add(llvm::createCFGSimplificationPass());
         optPM.add(llvm::createPruneEHPass());
@@ -590,10 +591,10 @@ Optimize(llvm::Module *module, int optLevel) {
 #if defined(LLVM_3_2) || defined(LLVM_3_3)
         // Starting from 3.4 this functionality was moved to
         // InstructionCombiningPass. See r184459 for details.
-        optPM.add(llvm::createSimplifyLibCallsPass(), 240);
+        optPM.add(llvm::createSimplifyLibCallsPass(), 241);
 #endif
         optPM.add(llvm::createAggressiveDCEPass());
-        optPM.add(llvm::createInstructionCombiningPass(), 241);
+        optPM.add(llvm::createInstructionCombiningPass(), 242);
         optPM.add(llvm::createJumpThreadingPass());
         optPM.add(llvm::createCFGSimplificationPass());
         optPM.add(llvm::createScalarReplAggregatesPass(sr_threshold));
@@ -601,45 +602,45 @@ Optimize(llvm::Module *module, int optLevel) {
         optPM.add(llvm::createTailCallEliminationPass());
 
         if (!g->opt.disableMaskAllOnOptimizations) {
-            optPM.add(CreateIntrinsicsOptPass(), 250);
+            optPM.add(CreateIntrinsicsOptPass(), 251);
             optPM.add(CreateInstructionSimplifyPass());
         }
 
         if (g->opt.disableGatherScatterOptimizations == false &&
             g->target->getVectorWidth() > 1) {
-            optPM.add(llvm::createInstructionCombiningPass(), 255);
+            optPM.add(llvm::createInstructionCombiningPass(), 256);
             optPM.add(CreateImproveMemoryOpsPass());
 
             if (g->opt.disableCoalescing == false &&
                 g->target->getISA() != Target::GENERIC) {
                 // It is important to run this here to make it easier to
                 // finding matching gathers we can coalesce..
-                optPM.add(llvm::createEarlyCSEPass(), 260);
+                optPM.add(llvm::createEarlyCSEPass(), 261);
                 optPM.add(CreateGatherCoalescePass());
             }
         }
 
-        optPM.add(llvm::createFunctionInliningPass(), 265);
+        optPM.add(llvm::createFunctionInliningPass(), 266);
         optPM.add(llvm::createConstantPropagationPass());
         optPM.add(CreateIntrinsicsOptPass());
         optPM.add(CreateInstructionSimplifyPass());
 
         if (g->opt.disableGatherScatterOptimizations == false &&
             g->target->getVectorWidth() > 1) {
-            optPM.add(llvm::createInstructionCombiningPass(), 270);
+            optPM.add(llvm::createInstructionCombiningPass(), 271);
             optPM.add(CreateImproveMemoryOpsPass());
         }
 
-        optPM.add(llvm::createIPSCCPPass(), 275);
+        optPM.add(llvm::createIPSCCPPass(), 276);
         optPM.add(llvm::createDeadArgEliminationPass());
         optPM.add(llvm::createAggressiveDCEPass());
         optPM.add(llvm::createInstructionCombiningPass());
         optPM.add(llvm::createCFGSimplificationPass());
 
         if (g->opt.disableHandlePseudoMemoryOps == false) {
-            optPM.add(CreateReplacePseudoMemoryOpsPass(),280);
+            optPM.add(CreateReplacePseudoMemoryOpsPass(),281);
         }
-        optPM.add(CreateIntrinsicsOptPass(),281);
+        optPM.add(CreateIntrinsicsOptPass(),282);
         optPM.add(CreateInstructionSimplifyPass());
 
         optPM.add(llvm::createFunctionInliningPass());
@@ -658,9 +659,9 @@ Optimize(llvm::Module *module, int optLevel) {
         optPM.add(llvm::createLoopIdiomPass());
         optPM.add(llvm::createLoopDeletionPass());
         if (g->opt.unrollLoops) {
-            optPM.add(llvm::createLoopUnrollPass(), 300);
+            optPM.add(llvm::createLoopUnrollPass(), 301);
         }
-        optPM.add(llvm::createGVNPass(), 301);
+        optPM.add(llvm::createGVNPass(), 302);
 
         optPM.add(CreateIsCompileTimeConstantPass(true));
         optPM.add(CreateIntrinsicsOptPass());

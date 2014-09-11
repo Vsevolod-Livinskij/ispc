@@ -3898,6 +3898,19 @@ static FORCEINLINE void __prefetch_read_uniform_nt(unsigned char *ptr) {
     _mm_prefetch((char *)ptr, _MM_HINT_NTA);
 }
 
+#define PREFETCH_READ_VARYING(LEVEL_FUNC)                                                                   \
+static FORCEINLINE void __prefetch_read_varying_hardware_##LEVEL_FUNC(uint8_t *base, uint32_t scale,        \
+                                                             __vec4_i32 offsets, __vec4_i1 mask) {          \
+}                                                                                                           \
+                                                                                                            \
+static FORCEINLINE void __prefetch_read_varying_software_##LEVEL_FUNC(__vec4_i64 addr, __vec4_i1 mask) {    \
+}
+
+PREFETCH_READ_VARYING(1)
+PREFETCH_READ_VARYING(2)
+PREFETCH_READ_VARYING(3)
+PREFETCH_READ_VARYING(nt)
+
 ///////////////////////////////////////////////////////////////////////////
 // atomics
 

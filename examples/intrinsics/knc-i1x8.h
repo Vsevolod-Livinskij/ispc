@@ -2608,13 +2608,13 @@ static FORCEINLINE void __prefetch_read_uniform_nt(unsigned char *p) {
 
 #define PREFETCH_READ_VARYING(LEVEL_FUNC, CACHE_LEVEL)                                                      \
 static FORCEINLINE void __prefetch_read_varying_hardware_##LEVEL_FUNC(uint8_t *base, uint32_t scale,        \
-                                                             __vec16_i32 offsets, __vec16_i1 mask) {        \
+                                                             __vec8_i32 offsets, __vec8_i1 mask) {          \
     _mm512_prefetch_i32gather_ps(offsets, base, scale, CACHE_LEVEL);                                        \
     offsets = _mm512_permutevar_epi32(_mm512_set_16to16_pi(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15), offsets);\
     _mm512_prefetch_i32gather_ps(offsets, base, scale, CACHE_LEVEL);                                        \
 }                                                                                                           \
                                                                                                             \
-static FORCEINLINE void __prefetch_read_varying_software_##LEVEL_FUNC(__vec16_i64 addr, __vec16_i1 mask) {  \
+static FORCEINLINE void __prefetch_read_varying_software_##LEVEL_FUNC(__vec8_i64 addr, __vec8_i1 mask) {    \
 }
 
 PREFETCH_READ_VARYING(1, _MM_HINT_T0)
@@ -2622,10 +2622,10 @@ PREFETCH_READ_VARYING(2, _MM_HINT_T1)
 PREFETCH_READ_VARYING(nt, _MM_HINT_T2)
 
 static FORCEINLINE void __prefetch_read_varying_hardware_3(uint8_t *base, uint32_t scale,
-                                                           __vec16_i32 offsets, __vec16_i1 mask) {
+                                                           __vec8_i32 offsets, __vec8_i1 mask) {
 }
 
-static FORCEINLINE void __prefetch_read_varying_software_3(__vec16_i64 addr, __vec16_i1 mask) {
+static FORCEINLINE void __prefetch_read_varying_software_3(__vec8_i64 addr, __vec8_i1 mask) {
 }
 
 ///////////////////////////////////////////////////////////////////////////

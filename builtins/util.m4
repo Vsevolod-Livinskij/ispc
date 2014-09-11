@@ -2604,6 +2604,22 @@ define void @__keep_funcs_live(i8 * %ptr, <WIDTH x i8> %v8, <WIDTH x i16> %v16,
                                <WIDTH x i32> %v32, <WIDTH x i64> %v64,
                                <WIDTH x MASK> %mask) {
   ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+  ;; prefetchs
+  call void @__pseudo_prefetch_read_varying_1(<WIDTH x i64> %v64, <WIDTH x MASK> %mask)
+  call void @__pseudo_prefetch_read_varying_2(<WIDTH x i64> %v64, <WIDTH x MASK> %mask)
+  call void @__pseudo_prefetch_read_varying_3(<WIDTH x i64> %v64, <WIDTH x MASK> %mask)
+  call void @__pseudo_prefetch_read_varying_nt(<WIDTH x i64> %v64, <WIDTH x MASK> %mask)
+  call void @__prefetch_read_varying_software_1(<WIDTH x i64> %v64, <WIDTH x MASK> %mask)
+  call void @__prefetch_read_varying_software_2(<WIDTH x i64> %v64, <WIDTH x MASK> %mask)
+  call void @__prefetch_read_varying_software_3(<WIDTH x i64> %v64, <WIDTH x MASK> %mask)
+  call void @__prefetch_read_varying_software_nt(<WIDTH x i64> %v64, <WIDTH x MASK> %mask)
+  call void @__prefetch_read_varying_hardware_1(i8 * %ptr, i32 0, <WIDTH x i32> %v32, <WIDTH x MASK> %mask)
+  call void @__prefetch_read_varying_hardware_2(i8 * %ptr, i32 0, <WIDTH x i32> %v32, <WIDTH x MASK> %mask)
+  call void @__prefetch_read_varying_hardware_3(i8 * %ptr, i32 0, <WIDTH x i32> %v32, <WIDTH x MASK> %mask)
+  call void @__prefetch_read_varying_hardware_nt(i8 * %ptr, i32 0, <WIDTH x i32> %v32, <WIDTH x MASK> %mask)
+
+
+  ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
   ;; loads
   %ml8  = call <WIDTH x i8>  @__masked_load_i8(i8 * %ptr, <WIDTH x MASK> %mask)
   call void @__use8(<WIDTH x i8> %ml8)

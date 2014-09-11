@@ -519,8 +519,7 @@ Optimize(llvm::Module *module, int optLevel) {
         llvm::initializeInstrumentation(*registry);
         llvm::initializeTarget(*registry);
 
-        optPM.add(CreateImprovePrefetchPass(), 185);
-        optPM.add(llvm::createGlobalDCEPass());
+        optPM.add(llvm::createGlobalDCEPass(), 185);
 
         // Setup to use LLVM default AliasAnalysis
         // Ideally, we want call:
@@ -531,7 +530,7 @@ Optimize(llvm::Module *module, int optLevel) {
         // so we explicitly enable them here.
         // Need to keep sync with future LLVM change
         // An alternative is to call populateFunctionPassManager()
-        optPM.add(llvm::createTypeBasedAliasAnalysisPass(), 191);
+        optPM.add(llvm::createTypeBasedAliasAnalysisPass(), 190);
         optPM.add(llvm::createBasicAliasAnalysisPass());
         optPM.add(llvm::createCFGSimplificationPass());
         // Here clang has an experimental pass SROAPass instead of
@@ -542,7 +541,7 @@ Optimize(llvm::Module *module, int optLevel) {
 
         // Early optimizations to try to reduce the total amount of code to
         // work with if we can
-        optPM.add(llvm::createReassociatePass(), 201);
+        optPM.add(llvm::createReassociatePass(), 200);
         optPM.add(llvm::createConstantPropagationPass());
         optPM.add(llvm::createDeadInstEliminationPass());
         optPM.add(llvm::createCFGSimplificationPass());
@@ -553,13 +552,14 @@ Optimize(llvm::Module *module, int optLevel) {
 
         if (g->opt.disableGatherScatterOptimizations == false &&
             g->target->getVectorWidth() > 1) {
-            optPM.add(llvm::createInstructionCombiningPass(), 211);
+            optPM.add(llvm::createInstructionCombiningPass(), 210);
             optPM.add(CreateImproveMemoryOpsPass());
         }
         if (!g->opt.disableMaskAllOnOptimizations) {
-            optPM.add(CreateIntrinsicsOptPass(), 216);
+            optPM.add(CreateIntrinsicsOptPass(), 215);
             optPM.add(CreateInstructionSimplifyPass());
         }
+        optPM.add(CreateImprovePrefetchPass());
         optPM.add(llvm::createDeadInstEliminationPass(), 221);
 
         // Max struct size threshold for scalar replacement is
@@ -2851,21 +2851,13 @@ lPrefetchImprove(llvm::CallInst *callInst) {
                                      LLVMGetName(basePtr, "_2void"), callInst);
     lCopyMetadata(basePtr, callInst);
 
-    llvm::Function *prefCallFunc = info->swFunc;
+    llvm::Function *prefCallFunc = info->hwFunc;
 
     if (g->target->hasVecPrefetch()) {
         // See if the offsets are scaled by 2, 4, or 8.  If so,
         // extract that scale factor and rewrite the offsets to remove
         // it.
         llvm::Value *offsetScale = lExtractOffsetVector248Scale(&offsetVector);
-
-        // If we're doing 32-bit addressing on a 64-bit target, here we
-        // will see if we can call one of the 32-bit variants of the pseudo
-        // prefetch function.
-        if (g->opt.force32BitAddressing &&
-            lOffsets32BitSafe(&offsetVector, callInst)) {
-            prefCallFunc = info->hwFunc;
-        }
 
         llvm::Value *mask = callInst->getArgOperand(1);
 
@@ -4772,6 +4764,10 @@ MakeInternalFuncsStaticPass::runOnModule(llvm::Module &module) {
         "__scatter64_i8", "__scatter64_i16",
         "__scatter64_i32", "__scatter64_i64",
         "__scatter64_float", "__scatter64_double",
+        "__prefetch_read_varying_software_1", "__prefetch_read_varying_hardware_1",
+        "__prefetch_read_varying_software_2", "__prefetch_read_varying_hardware_2",
+        "__prefetch_read_varying_software_3", "__prefetch_read_varying_hardware_3",
+        "__prefetch_read_varying_software_nt", "__prefetch_read_varying_hardware_nt",
         "__keep_funcs_live",
     };
 

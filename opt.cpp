@@ -131,6 +131,7 @@ static llvm::Pass *CreateReplaceStdlibShiftPass();
 static llvm::Pass *CreateFixBooleanSelectPass();
 
 static llvm::Pass *CreateImprovePrefetchPass();
+static llvm::Pass *CreateReplacePseudoPrefetchPass();
 
 #define DEBUG_START_PASS(NAME)                                 \
     if (g->debugPrint &&                                       \
@@ -501,6 +502,7 @@ Optimize(llvm::Module *module, int optLevel) {
 
         optPM.add(CreateIntrinsicsOptPass(), 102);
         optPM.add(CreateImprovePrefetchPass());
+        optPM.add(CreateReplacePseudoPrefetchPass());
         optPM.add(CreateIsCompileTimeConstantPass(true));
         optPM.add(llvm::createFunctionInliningPass());
         optPM.add(CreateMakeInternalFuncsStaticPass());
@@ -620,27 +622,29 @@ Optimize(llvm::Module *module, int optLevel) {
             }
         }
 
-        optPM.add(llvm::createFunctionInliningPass(), 266);
+        optPM.add(CreateImprovePrefetchPass(), 266);
+        optPM.add(llvm::createFunctionInliningPass(), 267);
         optPM.add(llvm::createConstantPropagationPass());
         optPM.add(CreateIntrinsicsOptPass());
         optPM.add(CreateInstructionSimplifyPass());
 
         if (g->opt.disableGatherScatterOptimizations == false &&
             g->target->getVectorWidth() > 1) {
-            optPM.add(llvm::createInstructionCombiningPass(), 271);
+            optPM.add(llvm::createInstructionCombiningPass(), 272);
             optPM.add(CreateImproveMemoryOpsPass());
         }
 
-        optPM.add(llvm::createIPSCCPPass(), 276);
+        optPM.add(llvm::createIPSCCPPass(), 277);
         optPM.add(llvm::createDeadArgEliminationPass());
         optPM.add(llvm::createAggressiveDCEPass());
         optPM.add(llvm::createInstructionCombiningPass());
         optPM.add(llvm::createCFGSimplificationPass());
 
         if (g->opt.disableHandlePseudoMemoryOps == false) {
-            optPM.add(CreateReplacePseudoMemoryOpsPass(),281);
+            optPM.add(CreateReplacePseudoMemoryOpsPass(),282);
         }
-        optPM.add(CreateIntrinsicsOptPass(),282);
+        optPM.add(CreateReplacePseudoPrefetchPass(), 283);
+        optPM.add(CreateIntrinsicsOptPass());
         optPM.add(CreateInstructionSimplifyPass());
 
         optPM.add(llvm::createFunctionInliningPass());
@@ -659,9 +663,9 @@ Optimize(llvm::Module *module, int optLevel) {
         optPM.add(llvm::createLoopIdiomPass());
         optPM.add(llvm::createLoopDeletionPass());
         if (g->opt.unrollLoops) {
-            optPM.add(llvm::createLoopUnrollPass(), 301);
+            optPM.add(llvm::createLoopUnrollPass(), 303);
         }
-        optPM.add(llvm::createGVNPass(), 302);
+        optPM.add(llvm::createGVNPass(), 304);
 
         optPM.add(CreateIsCompileTimeConstantPass(true));
         optPM.add(CreateIntrinsicsOptPass());
@@ -2841,7 +2845,6 @@ lPrefetchImprove(llvm::CallInst *callInst) {
         // It's actually a fully general prefetch with a varying
         // set of base pointers, so leave it as is and continune onward
         // to the next instruction...
-        callInst->setCalledFunction(info->swFunc);
         return false;
     }
 
@@ -2866,12 +2869,14 @@ lPrefetchImprove(llvm::CallInst *callInst) {
         // llvm::Instruction to llvm::CallInst::Create; this means that
         // the instruction isn't inserted into a basic block and that
         // way we can then call ReplaceInstWithInst().
+        printf("Deb1");
         llvm::Instruction *newCall =
             lCallInst(prefCallFunc, basePtr, offsetScale, offsetVector,
                       mask, callInst->getName().str().c_str(),
                       NULL);
         lCopyMetadata(newCall, callInst);
         llvm::ReplaceInstWithInst(callInst, newCall);
+        printf("Deb2");
     }
     else {
         callInst->setCalledFunction(info->swFunc);
@@ -2910,6 +2915,92 @@ ImprovePrefetchPass::runOnBasicBlock(llvm::BasicBlock &bb) {
 static llvm::Pass *
 CreateImprovePrefetchPass() {
     return new ImprovePrefetchPass;
+}
+
+///////////////////////////////////////////////////////////////////////////
+// ReplacePseudoPrefetchPass
+
+/** For any prefetchs remaining after the ImprovePrefetchPass
+    runs, we need to turn them into software prefetchs.
+    This task is handled by the ReplacePseudoPrefetchPass here.
+ */
+class ReplacePseudoPrefetchPass : public llvm::BasicBlockPass {
+public:
+    static char ID;
+    ReplacePseudoPrefetchPass() : BasicBlockPass(ID) { }
+
+    const char *getPassName() const { return "Replace Pseudo Prefetch"; }
+    bool runOnBasicBlock(llvm::BasicBlock &BB);
+};
+
+
+char ReplacePseudoPrefetchPass::ID = 0;
+
+static bool
+lReplacePseudoPrefetch(llvm::CallInst *callInst) {
+    struct LowerPrefetchInfo {
+        LowerPrefetchInfo(const char *pName, const char *aName) {
+            pseudoFunc = m->module->getFunction(pName);
+            actualFunc = m->module->getFunction(aName);
+        }
+        llvm::Function *pseudoFunc;
+        llvm::Function *actualFunc;
+    };
+
+    LowerPrefetchInfo lprefInfo[] = {
+        LowerPrefetchInfo("__pseudo_prefetch_read_varying_1",   "__prefetch_read_varying_software_1"),
+        LowerPrefetchInfo("__pseudo_prefetch_read_varying_2",   "__prefetch_read_varying_software_2"),
+        LowerPrefetchInfo("__pseudo_prefetch_read_varying_3",   "__prefetch_read_varying_software_3"),
+        LowerPrefetchInfo("__pseudo_prefetch_read_varying_nt",  "__prefetch_read_varying_software_nt"),
+    };
+
+    llvm::Function *calledFunc = callInst->getCalledFunction();
+
+    LowerPrefetchInfo *info = NULL;
+    for (unsigned int i = 0; i < sizeof(lprefInfo) / sizeof(lprefInfo[0]); ++i) {
+        if (lprefInfo[i].pseudoFunc != NULL &&
+            calledFunc == lprefInfo[i].pseudoFunc) {
+            info = &lprefInfo[i];
+            break;
+        }
+    }
+    if (info == NULL)
+        return false;
+
+    Assert(info->actualFunc != NULL);
+
+    callInst->setCalledFunction(info->actualFunc);
+    return true;
+}
+
+bool
+ReplacePseudoPrefetchPass::runOnBasicBlock(llvm::BasicBlock &bb) {
+    DEBUG_START_PASS("ReplacePseudoPrefetchPass");
+
+    bool modifiedAny = false;
+
+ restart:
+    for (llvm::BasicBlock::iterator iter = bb.begin(), e = bb.end(); iter != e; ++iter) {
+        llvm::CallInst *callInst = llvm::dyn_cast<llvm::CallInst>(&*iter);
+        if (callInst == NULL ||
+            callInst->getCalledFunction() == NULL)
+            continue;
+
+        if (lReplacePseudoPrefetch(callInst)) {
+            modifiedAny = true;
+            goto restart;
+        }
+    }
+
+    DEBUG_END_PASS("ReplacePseudoPrefetchPass");
+
+    return modifiedAny;
+}
+
+
+static llvm::Pass *
+CreateReplacePseudoPrefetchPass() {
+    return new ReplacePseudoPrefetchPass;
 }
 
 ///////////////////////////////////////////////////////////////////////////

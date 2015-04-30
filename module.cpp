@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2010-2013, Intel Corporation
+  Copyright (c) 2010-2015, Intel Corporation
   All rights reserved.
 
   Redistribution and use in source and binary forms, with or without
@@ -58,19 +58,25 @@
 #include <set>
 #include <sstream>
 #include <iostream>
+#ifdef ISPC_NVPTX_ENABLED
+#include <map>
+#endif /* ISPC_NVPTX_ENABLED */
 #ifdef ISPC_IS_WINDOWS
 #include <windows.h>
 #include <io.h>
 #define strcasecmp stricmp
 #endif
 
-#if defined(LLVM_3_1) || defined(LLVM_3_2)
+#if defined(LLVM_3_2)
   #include <llvm/LLVMContext.h>
   #include <llvm/Module.h>
   #include <llvm/Type.h>
   #include <llvm/Instructions.h>
   #include <llvm/Intrinsics.h>
   #include <llvm/DerivedTypes.h>
+#ifdef ISPC_NVPTX_ENABLED
+  #include "llvm/Assembly/AssemblyAnnotationWriter.h"
+#endif /* ISPC_NVPTX_ENABLED */
 #else
   #include <llvm/IR/LLVMContext.h>
   #include <llvm/IR/Module.h>
@@ -78,32 +84,49 @@
   #include <llvm/IR/Instructions.h>
   #include <llvm/IR/Intrinsics.h>
   #include <llvm/IR/DerivedTypes.h>
+#ifdef ISPC_NVPTX_ENABLED
+#if !defined(LLVM_3_2) && !defined(LLVM_3_3) && !defined(LLVM_3_4) // LLVM 3.5+
+  #include <llvm/IR/AssemblyAnnotationWriter.h>
+#else
+  #include <llvm/Assembly/AssemblyAnnotationWriter.h>
 #endif
-#include <llvm/PassManager.h>
+#endif /* ISPC_NVPTX_ENABLED */
+#endif
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5) || defined(LLVM_3_6)
+  #include "llvm/PassManager.h"
+#else // LLVM 3.7+
+  #include "llvm/IR/LegacyPassManager.h"
+#endif
 #include <llvm/PassRegistry.h>
 #include <llvm/Transforms/IPO.h>
 #include <llvm/Support/FormattedStream.h>
 #include <llvm/Support/FileUtilities.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
-#if defined(LLVM_3_1)
-  #include <llvm/Target/TargetData.h>
-#elif defined(LLVM_3_2)
+#if defined(LLVM_3_2)
   #include <llvm/DataLayout.h>
   #include <llvm/TargetTransformInfo.h>
 #else // LLVM 3.3+
   #include <llvm/IR/DataLayout.h>
   #include <llvm/Analysis/TargetTransformInfo.h>
 #endif
-#include <llvm/Analysis/Verifier.h>
-#include <llvm/Support/CFG.h>
+#if !defined(LLVM_3_2) && !defined(LLVM_3_3) && !defined(LLVM_3_4) // LLVM 3.5+
+    #include <llvm/IR/Verifier.h>
+    #include <llvm/IR/IRPrintingPasses.h>
+    #include <llvm/IR/InstIterator.h>
+    #include <llvm/IR/CFG.h>
+#else
+    #include <llvm/Analysis/Verifier.h>
+    #include <llvm/Assembly/PrintModulePass.h>
+    #include <llvm/Support/InstIterator.h>
+    #include <llvm/Support/CFG.h>
+#endif
 #include <clang/Frontend/CompilerInstance.h>
 #include <clang/Frontend/TextDiagnosticPrinter.h>
 #include <clang/Frontend/Utils.h>
 #include <clang/Basic/TargetInfo.h>
 #include <llvm/Support/ToolOutputFile.h>
 #include <llvm/Support/Host.h>
-#include <llvm/Assembly/PrintModulePass.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Bitcode/ReaderWriter.h>
 
@@ -147,41 +170,112 @@ static void
 lStripUnusedDebugInfo(llvm::Module *module) {
     if (g->generateDebuggingSymbols == false)
         return;
-
+#if defined (LLVM_3_2) || defined (LLVM_3_3)|| defined (LLVM_3_4)|| defined (LLVM_3_5)
+    std::set<llvm::Value *> SPall;
+#else // LLVM 3.6++
+    std::set<llvm::Metadata *> SPall;
+#endif
+    // OK, now we are to determine which functions actually survived the
+    // optimization. We will now read all IR instructions in the module.
+    //
+    // for every function in the module
+    for (llvm::Module::const_iterator
+             f = module->begin(), fe = module->end(); f != fe; ++f) {
+        /// for every instruction in the function
+        for (llvm::const_inst_iterator
+                 i = llvm::inst_begin(&(*f)),
+                 ie = llvm::inst_end(&(*f)); i != ie; ++i) {
+            const llvm::Instruction *inst = &(*i);
+            // get the instruction`s debugging metadata
+            llvm::MDNode *node = inst->getMetadata(llvm::LLVMContext::MD_dbg);
+            while (node) {
+                // get the scope of the current instruction`s location
+                // node becomes NULL if this was the original location
+#if defined (LLVM_3_2) || defined (LLVM_3_3)|| defined (LLVM_3_4)|| defined (LLVM_3_5) || (LLVM_3_6)
+                llvm::DILocation dloc(node);
+                llvm::DIScope scope = dloc.getScope();
+                node = dloc.getOrigLocation();
+                // now following a chain of nested scopes
+                while (!0) {
+                    if (scope.isLexicalBlockFile())
+                        scope = llvm::DILexicalBlockFile(scope).getScope();
+                    else if (scope.isLexicalBlock())
+                        scope = llvm::DILexicalBlock(scope).getContext();
+                    else if (scope.isNameSpace())
+                        scope = llvm::DINameSpace(scope).getContext();
+                    else break;
+                }
+                if (scope.isSubprogram()) {
+#else // LLVM 3.7+
+                llvm::MDLocation *dloc = llvm::cast<llvm::MDLocation>(node);
+                llvm::MDScope *scope = dloc->getScope();
+                node = dloc->getInlinedAt();
+                // now following a chain of nested scopes
+                while (!0) {
+                    if (llvm::isa<llvm::MDLexicalBlockFile>(scope))
+                        scope = llvm::cast<llvm::MDLexicalBlockFile>(scope)->getScope();
+                    else if (llvm::isa<llvm::MDLexicalBlockBase>(scope))
+                        scope = llvm::cast<llvm::MDLexicalBlockBase>(scope)->getScope();
+                    else if (llvm::isa<llvm::MDNamespace>(scope))
+                        scope = llvm::cast<llvm::MDNamespace>(scope)->getScope();
+                    else break;
+                }
+                if (llvm::isa<llvm::MDSubprogram>(scope)) {
+#endif
+                    // good, the chain ended with a function; adding
+                    SPall.insert(scope);
+                }
+            }
+        }
+    }
     // loop over the compile units that contributed to the final module
     if (llvm::NamedMDNode *cuNodes = module->getNamedMetadata("llvm.dbg.cu")) {
         for (unsigned i = 0, ie = cuNodes->getNumOperands(); i != ie; ++i) {
             llvm::MDNode *cuNode = cuNodes->getOperand(i);
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5) || defined(LLVM_3_6)
             llvm::DICompileUnit cu(cuNode);
             llvm::DIArray subprograms = cu.getSubprograms();
-            std::vector<llvm::Value *> usedSubprograms;
-
-            if (subprograms.getNumElements() == 0)
+            if (subprograms.getNumElements() == 0) {
+#else // LLVM 3.7+
+            llvm::MDCompileUnit *cu = llvm::cast<llvm::MDCompileUnit>(cuNode);
+            llvm::MDSubprogramArray subprograms = cu->getSubprograms();
+            if (subprograms.size() == 0) {
+#endif
                 continue;
-
-            // And now loop over the subprograms inside each compile unit.
-            for (unsigned j = 0, je = subprograms.getNumElements(); j != je; ++j) {
-                llvm::MDNode *spNode =
-                    llvm::dyn_cast<llvm::MDNode>(subprograms->getOperand(j));
-                Assert(spNode != NULL);
-                llvm::DISubprogram sp(spNode);
-
-                // Get the name of the subprogram.  Start with the mangled
-                // name; if that's empty then we have an export'ed
-                // function, so grab the unmangled name in that case.
-                std::string name = sp.getLinkageName();
-                if (name == "")
-                    name = sp.getName();
-
-                // Does the llvm::Function for this function survive in the
-                // module?
-                if (module->getFunction(name) != NULL)
-                    usedSubprograms.push_back(sp);
             }
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5)
+            std::set<llvm::Value *> SPset;
+            std::vector<llvm::Value *> usedSubprograms;
+#else // LLVM 3.6+
+            std::set<llvm::Metadata *> SPset;
+            std::vector<llvm::Metadata *> usedSubprograms;
+#endif
+
+            // determine what functions of those extracted belong to the unit
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5) || defined(LLVM_3_6)
+            for (unsigned j = 0, je = subprograms.getNumElements(); j != je; ++j)
+#else // LLVM 3.7+
+            for (unsigned j = 0, je = subprograms.size(); j != je; ++j)
+#endif
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5)
+                SPset.insert(subprograms->getOperand(j));
+#elif defined(LLVM_3_6)
+                SPset.insert(subprograms.getElement(j));
+#else // LLVM 3.7+
+                SPset.insert(subprograms [j]);
+#endif
+
+            std::set_intersection(SPall.begin(), SPall.end(),
+                                  SPset.begin(), SPset.end(),
+                                  std::back_inserter(usedSubprograms));
 
             Debug(SourcePos(), "%d / %d functions left in module with debug "
                   "info.", (int)usedSubprograms.size(),
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5) || defined(LLVM_3_6)
                   (int)subprograms.getNumElements());
+#else // LLVM 3.7+
+                  (int)subprograms.size());
+#endif
 
             // We'd now like to replace the array of subprograms in the
             // compile unit with only the ones that actually have function
@@ -202,7 +296,7 @@ lStripUnusedDebugInfo(llvm::Module *module) {
             // stuff and remove it later on. Removing it is useful, as it
             // reduces size of the binary significantly (manyfold for small
             // programs).
-#if defined(LLVM_3_1) || defined(LLVM_3_2)
+#if defined(LLVM_3_2)
             llvm::MDNode *nodeSPMD =
                 llvm::dyn_cast<llvm::MDNode>(cuNode->getOperand(12));
             Assert(nodeSPMD != NULL);
@@ -220,7 +314,7 @@ lStripUnusedDebugInfo(llvm::Module *module) {
             llvm::MDNode *replNode =
                 llvm::MDNode::get(*g->ctx, llvm::ArrayRef<llvm::Value *>(usedSubprogramsArray));
             cuNode->replaceOperandWith(12, replNode);
-#else // LLVM 3.3+
+#elif defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5)
             llvm::MDNode *nodeSPMDArray =
                 llvm::dyn_cast<llvm::MDNode>(cuNode->getOperand(9));
             Assert(nodeSPMDArray != NULL);
@@ -234,6 +328,29 @@ lStripUnusedDebugInfo(llvm::Module *module) {
             llvm::MDNode *replNode =
                 m->diBuilder->getOrCreateArray(llvm::ArrayRef<llvm::Value *>(usedSubprograms));
             cuNode->replaceOperandWith(9, replNode);
+#else // LLVM 3.6+
+  #if defined(LLVM_3_6)
+            llvm::DIArray nodeSPs = cu.getSubprograms();
+            Assert(nodeSPs.getNumElements() == subprograms.getNumElements());
+            for (int i = 0; i < (int)nodeSPs.getNumElements(); ++i)
+                 Assert(nodeSPs.getElement(i) == subprograms.getElement(i));
+
+            // And now we can go and stuff it into the unit with some
+            // confidence...
+            llvm::MDNode *replNode = llvm::MDNode::get(module->getContext(), 
+                                                       llvm::ArrayRef<llvm::Metadata *>(usedSubprograms));
+            cu.replaceSubprograms(llvm::DIArray(replNode));
+  #else // LLVM 3.7+
+            llvm::MDSubprogramArray nodeSPs = cu->getSubprograms();
+            Assert(nodeSPs.size() == subprograms.size());
+            for (int i = 0; i < (int)nodeSPs.size(); ++i)
+                 Assert(nodeSPs [i] == subprograms [i]);
+
+            // And now we can go and stuff it into the unit with some
+            // confidence...
+            cu->replaceSubprograms(llvm::MDTuple::get(cu->getContext(),
+                                                      llvm::ArrayRef<llvm::Metadata *>(usedSubprograms)));
+  #endif
 #endif
         }
     }
@@ -249,12 +366,6 @@ lStripUnusedDebugInfo(llvm::Module *module) {
     }
     for (int i = 0; i < (int)toErase.size(); ++i)
         module->eraseNamedMetadata(toErase[i]);
-
-    // Wrap up by running the LLVM pass to remove anything left that's
-    // unused.
-    llvm::PassManager pm;
-    pm.add(llvm::createStripDeadDebugInfoPass());
-    pm.run(*module);
 }
 
 
@@ -307,6 +418,9 @@ Module::Module(const char *fn) {
             sprintf(producerString, "ispc version %s (built on %s)",
                     ISPC_VERSION, __DATE__);
 #endif
+#if !defined(LLVM_3_2) && !defined(LLVM_3_3)
+            diCompileUnit = 
+#endif // LLVM_3_4+            
             diBuilder->createCompileUnit(llvm::dwarf::DW_LANG_C99,  /* lang */
                                          name,  /* filename */
                                          directory, /* directory */
@@ -381,6 +495,8 @@ Module::CompileFile() {
 
     ast->GenerateIR();
 
+    if (diBuilder)
+        diBuilder->finalize();
     if (errorCount == 0)
         Optimize(module, g->opt.level);
 
@@ -419,7 +535,7 @@ Module::AddGlobalVariable(const std::string &name, const Type *type, Expr *initE
         return;
     }
 
-    if (Type::Equal(type, AtomicType::Void)) {
+    if (type->IsVoidType()) {
         Error(pos, "\"void\" type global variable is illegal.");
         return;
     }
@@ -435,6 +551,39 @@ Module::AddGlobalVariable(const std::string &name, const Type *type, Expr *initE
               "expression.");
         return;
     }
+
+#ifdef ISPC_NVPTX_ENABLED
+    if (g->target->getISA() == Target::NVPTX && 
+#if 0
+        !type->IsConstType()  &&
+#endif
+#if 1
+        at != NULL &&
+#endif
+        type->IsVaryingType())
+    {
+      Error(pos, "Global \"varying\" variables are not yet supported in \"nvptx\" target.");
+      return;
+#if 0
+        int nel = 32;  /* warp-size */
+        if (type->IsArrayType())
+        {
+          const ArrayType *at = CastType<ArrayType>(type);
+          /* we must scale # elements by 4, because a thread-block will run 4 warps
+           * or 128 threads.
+           * ***note-to-me***:please define these value (128threads/4warps)
+           * in nvptx-target definition
+           * instead of compile-time constants 
+           */
+          nel *= at->GetElementCount();
+          assert (!type->IsSOAType());
+          type = new ArrayType(at->GetElementType()->GetAsUniformType(), nel);
+        }
+        else
+          type = new ArrayType(type->GetAsUniformType(), nel);
+#endif
+    }
+#endif /* ISPC_NVPTX_ENABLED */
 
     llvm::Type *llvmType = type->LLVMType(g->ctx);
     if (llvmType == NULL)
@@ -549,24 +698,54 @@ Module::AddGlobalVariable(const std::string &name, const Type *type, Expr *initE
     }
 
     if (diBuilder) {
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5)
         llvm::DIFile file = pos.GetDIFile();
-        llvm::DIGlobalVariable var =
-            diBuilder->createGlobalVariable(name,
+        llvm::DIGlobalVariable var = diBuilder->createGlobalVariable(
+                                            name,
                                             file,
                                             pos.first_line,
                                             sym->type->GetDIType(file),
                                             (sym->storageClass == SC_STATIC),
                                             sym->storagePtr);
+#elif defined(LLVM_3_6)
+        llvm::DIFile file = pos.GetDIFile();
+        llvm::Constant *sym_const_storagePtr = llvm::dyn_cast<llvm::Constant>(sym->storagePtr);
+        Assert(sym_const_storagePtr);
+        llvm::DIGlobalVariable var = diBuilder->createGlobalVariable(
+                                            file,
+                                            name,
+                                            name,
+                                            file,
+                                            pos.first_line,
+                                            sym->type->GetDIType(file),
+                                            (sym->storageClass == SC_STATIC),
+                                            sym_const_storagePtr);
+#else // LLVM 3.7+
+        llvm::MDFile *file = pos.GetDIFile();
+        llvm::Constant *sym_const_storagePtr = llvm::dyn_cast<llvm::Constant>(sym->storagePtr);
+        Assert(sym_const_storagePtr);
+        diBuilder->createGlobalVariable(
+                                            file,
+                                            name,
+                                            name,
+                                            file,
+                                            pos.first_line,
+                                            sym->type->GetDIType(file),
+                                            (sym->storageClass == SC_STATIC),
+                                            sym_const_storagePtr);
+#endif
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5) || defined(LLVM_3_6)
         Assert(var.Verify());
+#else // LLVM 3.7+
+    //comming soon
+#endif
     }
 }
 
 
 /** Given an arbitrary type, see if it or any of the leaf types contained
     in it has a type that's illegal to have exported to C/C++
-    code--specifically, that it has a varying value in memory, or a pointer
-    to SOA data (which has a different representation than a regular
-    pointer.
+    code.
 
     (Note that it's fine for the original struct or a contained struct to
     be varying, so long as all of its members have bound 'uniform'
@@ -598,15 +777,18 @@ lRecursiveCheckValidParamType(const Type *t, bool vectorOk) {
 
     const PointerType *pt = CastType<PointerType>(t);
     if (pt != NULL) {
-        if (pt->IsSlice() || pt->IsVaryingType())
-            return false;
+      // Only allow exported uniform pointers
+      // Uniform pointers to varying data, however, are ok.
+      if (pt->IsVaryingType()) 
+        return false;
+      else
         return lRecursiveCheckValidParamType(pt->GetBaseType(), true);
     }
 
-    if (t->IsVaryingType())
-        return false;
-    else
-        return true;
+    if (t->IsVaryingType() && !vectorOk)
+      return false;
+    else 
+      return true;
 }
 
 
@@ -622,8 +804,8 @@ lCheckExportedParameterTypes(const Type *type, const std::string &name,
         if (CastType<PointerType>(type))
             Error(pos, "Varying pointer type parameter \"%s\" is illegal "
                   "in an exported function.", name.c_str());
-        else if (CastType<StructType>(type->GetBaseType()))
-            Error(pos, "Struct parameter \"%s\" with varying or vector typed "
+        if (CastType<StructType>(type->GetBaseType()))
+            Error(pos, "Struct parameter \"%s\" with vector typed "
                   "member(s) is illegal in an exported function.", name.c_str());
         else if (CastType<VectorType>(type))
             Error(pos, "Vector-typed parameter \"%s\" is illegal in an exported "
@@ -634,6 +816,22 @@ lCheckExportedParameterTypes(const Type *type, const std::string &name,
     }
 }
 
+#ifdef ISPC_NVPTX_ENABLED
+static void
+lCheckTaskParameterTypes(const Type *type, const std::string &name,
+                             SourcePos pos) {
+  if (g->target->getISA() != Target::NVPTX) 
+    return;
+  if (lRecursiveCheckValidParamType(type, false) == false) {
+    if (CastType<VectorType>(type))
+      Error(pos, "Vector-typed parameter \"%s\" is illegal in a task "
+          "function with \"nvptx\" target.", name.c_str());
+    else
+      Error(pos, "Varying parameter \"%s\" is illegal in a task function with \"nvptx\" target.",
+          name.c_str());
+    }
+}
+#endif /* ISPC_NVPTX_ENABLED */
 
 /** Given a function type, loop through the function parameters and see if
     any are StructTypes.  If so, issue an error; this is currently broken
@@ -775,30 +973,43 @@ Module::AddFunctionDeclaration(const std::string &name,
     std::string functionName = name;
     if (storageClass != SC_EXTERN_C) {
         functionName += functionType->Mangle();
-        if (g->mangleFunctionsWithTarget)
-            functionName += g->target->GetISAString();
+        // If we treat generic as smth, we should have appropriate mangling
+        if (g->mangleFunctionsWithTarget) {
+            if (g->target->getISA() == Target::GENERIC && 
+                !g->target->getTreatGenericAsSmth().empty())
+                functionName += g->target->getTreatGenericAsSmth();
+            else
+                functionName += g->target->GetISAString();
+        }
     }
     llvm::Function *function =
         llvm::Function::Create(llvmFunctionType, linkage, functionName.c_str(),
                                module);
+    
+#ifdef ISPC_IS_WINDOWS
+    // Make export functions callable from DLLS.
+    if ((g->dllExport) && (storageClass != SC_STATIC)) {
+      function->setDLLStorageClass(llvm::GlobalValue::DLLExportStorageClass);
+    }
+#endif
 
     // Set function attributes: we never throw exceptions
     function->setDoesNotThrow();
     if (storageClass != SC_EXTERN_C &&
-        !g->generateDebuggingSymbols &&
         isInline)
 #ifdef LLVM_3_2
         function->addFnAttr(llvm::Attributes::AlwaysInline);
-#else // LLVM 3.1 and 3.3+
+#else // LLVM 3.3+
         function->addFnAttr(llvm::Attribute::AlwaysInline);
 #endif
+
     if (functionType->isTask)
+#ifdef ISPC_NVPTX_ENABLED
+      /* evghenii: fails function verification when "if" executed in nvptx target */
+      if (g->target->getISA() != Target::NVPTX)
+#endif /* ISPC_NVPTX_ENABLED */
         // This also applies transitively to members I think?
-#if defined(LLVM_3_1)
-        function->setDoesNotAlias(1, true);
-#else // LLVM 3.2+
         function->setDoesNotAlias(1);
-#endif
 
     g->target->markFuncWithTargetAttr(function);
 
@@ -810,8 +1021,17 @@ Module::AddFunctionDeclaration(const std::string &name,
               "exported function \"%s\"", name.c_str());
 
     if (functionType->isTask &&
-        Type::Equal(functionType->GetReturnType(), AtomicType::Void) == false)
+        functionType->GetReturnType()->IsVoidType() == false)
         Error(pos, "Task-qualified functions must have void return type.");
+
+#ifdef ISPC_NVPTX_ENABLED
+    if (g->target->getISA() == Target::NVPTX &&
+        Type::Equal(functionType->GetReturnType(), AtomicType::Void) == false &&
+        functionType->isExported)
+    {
+        Error(pos, "Export-qualified functions must have void return type with \"nvptx\" target.");
+    }
+#endif /* ISPC_NVPTX_ENABLED */
 
     if (functionType->isExported || functionType->isExternC)
         lCheckForStructParameters(functionType, pos);
@@ -827,9 +1047,17 @@ Module::AddFunctionDeclaration(const std::string &name,
         const SourcePos &argPos = functionType->GetParameterSourcePos(i);
 
         // If the function is exported, make sure that the parameter
-        // doesn't have any varying stuff going on in it.
-        if (functionType->isExported)
-            lCheckExportedParameterTypes(argType, argName, argPos);
+        // doesn't have any funky stuff going on in it.
+        // JCB nomosoa - Varying is now a-ok.
+        if (functionType->isExported) {
+          lCheckExportedParameterTypes(argType, argName, argPos);
+        }
+
+#ifdef ISPC_NVPTX_ENABLED
+        if (functionType->isTask) {
+          lCheckTaskParameterTypes(argType, argName, argPos);
+        }
+#endif /* ISPC_NVPTX_ENABLED */
 
         // ISPC assumes that no pointers alias.  (It should be possible to
         // specify when this is not the case, but this should be the
@@ -847,12 +1075,7 @@ Module::AddFunctionDeclaration(const std::string &name,
 
             // NOTE: LLVM indexes function parameters starting from 1.
             // This is unintuitive.
-#if defined(LLVM_3_1)
-            function->setDoesNotAlias(i+1, true);
-#else
             function->setDoesNotAlias(i+1);
-#endif
-
 #if 0
             int align = 4 * RoundUpPow2(g->target->nativeVectorWidth);
             function->addAttribute(i+1, llvm::Attribute::constructAlignmentFromInt(align));
@@ -932,12 +1155,24 @@ Module::AddExportedTypes(const std::vector<std::pair<const Type *,
 
 bool
 Module::writeOutput(OutputType outputType, const char *outFileName,
-                    const char *includeFileName) {
-    if (diBuilder != NULL && outputType != Header) {
-        diBuilder->finalize();
-
+                    const char *includeFileName, DispatchHeaderInfo *DHI) {
+    if (diBuilder && (outputType != Header) && (outputType != Deps))
         lStripUnusedDebugInfo(module);
+
+#if !defined(LLVM_3_2) && !defined(LLVM_3_3) // LLVM 3.4+
+    // In LLVM_3_4 after r195494 and r195504 revisions we should pass
+    // "Debug Info Version" constant to the module. LLVM will ignore
+    // our Debug Info metadata without it.
+    if (g->generateDebuggingSymbols == true) {
+        module->addModuleFlag(llvm::Module::Warning, "Debug Info Version", llvm::DEBUG_METADATA_VERSION);
     }
+#endif
+
+    // SIC! (verifyModule() == TRUE) means "failed", see llvm-link code.
+    if ((outputType != Header) && (outputType != Deps)
+    &&  (outputType != HostStub) && (outputType != DevStub)
+    &&  module && llvm::verifyModule(*module))
+        FATAL("Resulting module verification failed!");
 
     // First, issue a warning if the output file suffix and the type of
     // file being created seem to mismatch.  This can help catch missing
@@ -948,10 +1183,26 @@ Module::writeOutput(OutputType outputType, const char *outFileName,
         const char *fileType = NULL;
         switch (outputType) {
         case Asm:
+#ifdef ISPC_NVPTX_ENABLED
+          if (g->target->getISA() == Target::NVPTX)
+          {
+            if (strcasecmp(suffix, "ptx"))
+                fileType = "assembly";
+          }
+          else
+#endif /* ISPC_NVPTX_ENABLED */
             if (strcasecmp(suffix, "s"))
                 fileType = "assembly";
             break;
         case Bitcode:
+#ifdef ISPC_NVPTX_ENABLED
+          if (g->target->getISA() == Target::NVPTX)
+          {
+            if (strcasecmp(suffix, "ll"))
+                fileType = "LLVM assembly";
+          }
+          else
+#endif /* ISPC_NVPTX_ENABLED */
             if (strcasecmp(suffix, "bc"))
                 fileType = "LLVM bitcode";
             break;
@@ -993,8 +1244,12 @@ Module::writeOutput(OutputType outputType, const char *outFileName,
                     "has suffix \"%s\"?", fileType, outFileName, suffix);
     }
 
-    if (outputType == Header)
-      return writeHeader(outFileName);
+    if (outputType == Header) {
+      if (DHI)
+        return writeDispatchHeader(DHI);
+      else
+        return writeHeader(outFileName);
+    }
     else if (outputType == Deps)
       return writeDeps(outFileName);
     else if (outputType == HostStub)
@@ -1018,6 +1273,89 @@ Module::writeOutput(OutputType outputType, const char *outFileName,
         return writeObjectFileOrAssembly(outputType, outFileName);
 }
 
+#ifdef ISPC_NVPTX_ENABLED
+typedef std::vector<std::string> vecString_t;
+static vecString_t 
+lSplitString(const std::string &s)
+{
+  std::stringstream ss(s);
+  std::istream_iterator<std::string> begin(ss);
+  std::istream_iterator<std::string> end;
+  return vecString_t(begin,end);
+}
+
+static void 
+lFixAttributes(const vecString_t &src, vecString_t &dst)
+{
+  dst.clear();
+
+  std::vector< std::pair<int,int> > attributePos;
+
+  typedef std::map<std::string, std::string> attributeMap_t;
+  attributeMap_t attributeMap;
+
+#ifdef ISPC_NVPTX_NVVM_OLD  /* guard for NVVM from CUDA TK < 7.0 */
+  for (vecString_t::const_iterator it = src.begin();  it != src.end(); it++)
+  {
+    const vecString_t words = lSplitString(*it);
+    if (!words.empty() && words[0] == "attributes" && words[1][0] == '#')
+    {
+      const int nWords = words.size();
+      assert(nWords > 3);
+      assert(words[2       ] == "=");
+      assert(words[3       ] == "{");
+      assert(words[nWords-1] == "}");
+      std::string attributes;
+      for (int w = 4; w < nWords-1; w++)
+          attributes += words[w] + " ";
+      attributeMap[words[1]] = attributes;
+    }
+  }
+#endif
+
+  for (vecString_t::const_iterator it = src.begin();  it != src.end(); it++)
+  {
+    vecString_t words = lSplitString(*it);
+    /* evghenii: is there a cleaner way to set target datalayout for ptx ? */
+    if (words.size() > 1 && (words[0] == "target" && words[1] == "datalayout"))
+    {
+      std::string s = "target datalayout = ";
+      s += '"';
+      s += "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64";
+      s += '"';
+      dst.push_back(s);
+      continue;
+    }
+    if (!words.empty() && words[0] == "attributes")
+      continue;
+    std::string s;
+    std::map<std::string, std::string> attributeSet;
+#ifdef ISPC_NVPTX_NVVM_OLD  /* guard for NVVM from CUDA TK < 7.0 */
+                            /* this attributed cannot be used in function parameters, so remove them */
+    attributeSet["readnone"]    = " ";
+    attributeSet["readonly"]    = " ";
+    attributeSet["readnone,"]   = ",";
+    attributeSet["readonly,"]   = ",";
+#endif
+
+
+    for (vecString_t::iterator w = words.begin(); w != words.end(); w++)
+    {
+      if (attributeSet.find(*w) != attributeSet.end())
+        *w = attributeSet[*w];
+
+      if ((*w)[0] == '#')
+      {
+        attributeMap_t::iterator m = attributeMap.find(*w);
+        if (m != attributeMap.end())
+          *w = attributeMap[*w];
+      }
+      s += *w + " ";
+    }
+    dst.push_back(s);
+  }
+}
+#endif /* ISPC_NVPTX_ENABLED */
 
 bool
 Module::writeBitcode(llvm::Module *module, const char *outFileName) {
@@ -1042,7 +1380,47 @@ Module::writeBitcode(llvm::Module *module, const char *outFileName) {
     }
 
     llvm::raw_fd_ostream fos(fd, (fd != 1), false);
-    llvm::WriteBitcodeToFile(module, fos);
+#ifdef ISPC_NVPTX_ENABLED
+    if (g->target->getISA() == Target::NVPTX)
+    {
+      /* when using "nvptx" target, emit patched/hacked assembly 
+       * NVPTX only accepts 3.2-style LLVM assembly, where attributes
+       * must be inlined, rather then referenced by #attribute_d
+       * As soon as NVVM support 3.3,3.4 style assembly this fix won't be needed
+       */
+      const std::string dl_string = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64";
+      module->setDataLayout(dl_string);
+
+      std::string s;
+      llvm::raw_string_ostream out(s);
+#if !defined(LLVM_3_2) && !defined(LLVM_3_3) && !defined(LLVM_3_4) // LLVM 3.5+
+      std::unique_ptr<llvm::AssemblyAnnotationWriter> Annotator;
+#else
+      llvm::OwningPtr<llvm::AssemblyAnnotationWriter> Annotator;
+#endif
+      module->print(out, Annotator.get());
+      std::istringstream iss(s);
+
+      vecString_t input,output;
+      while (std::getline(iss,s))
+        input.push_back(s);
+      output = input;
+
+#if !(defined(LLVM_3_1) || defined(LLVM_3_2))
+      /* do not fix attributed with LLVM 3.2, everything is fine there */
+      lFixAttributes(input,output);
+#endif
+
+      for (vecString_t::iterator it = output.begin(); it != output.end(); it++)
+      {
+        *it += "\n";
+        fos << *it;
+      }
+    }
+    else
+#endif /* ISPC_NVPTX_ENABLED */
+      llvm::WriteBitcodeToFile(module, fos);
+
     return true;
 }
 
@@ -1064,24 +1442,55 @@ Module::writeObjectFileOrAssembly(llvm::TargetMachine *targetMachine,
     llvm::TargetMachine::CodeGenFileType fileType = (outputType == Object) ?
         llvm::TargetMachine::CGFT_ObjectFile : llvm::TargetMachine::CGFT_AssemblyFile;
     bool binary = (fileType == llvm::TargetMachine::CGFT_ObjectFile);
+#if defined(LLVM_3_2) || defined(LLVM_3_3)
     unsigned int flags = binary ? llvm::raw_fd_ostream::F_Binary : 0;
+#elif defined(LLVM_3_4)
+    llvm::sys::fs::OpenFlags flags = binary ? llvm::sys::fs::F_Binary :
+        llvm::sys::fs::F_None;
+#else
+    llvm::sys::fs::OpenFlags flags = binary ? llvm::sys::fs::F_None :
+        llvm::sys::fs::F_Text;
 
+#endif
+
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5)
     std::string error;
+#else // LLVM 3.6+
+    std::error_code error;
+#endif
+
     llvm::tool_output_file *of = new llvm::tool_output_file(outFileName, error, flags);
+
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5)
     if (error.size()) {
+#else // LLVM 3.6+
+    if (error) {
+#endif
+
         fprintf(stderr, "Error opening output file \"%s\".\n", outFileName);
         return false;
     }
 
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5) || defined(LLVM_3_6)
     llvm::PassManager pm;
-#if defined(LLVM_3_1)
-    pm.add(new llvm::TargetData(*g->target->getDataLayout()));
-#else
-    pm.add(new llvm::DataLayout(*g->target->getDataLayout()));
+#else // LLVM 3.7+
+    llvm::legacy::PassManager pm;
 #endif
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4)
+    pm.add(new llvm::DataLayout(*g->target->getDataLayout()));
+#elif defined(LLVM_3_5)
+    pm.add(new llvm::DataLayoutPass(*g->target->getDataLayout()));
+#elif defined(LLVM_3_6)
+    llvm::DataLayoutPass *dlp= new llvm::DataLayoutPass();
+    dlp->doInitialization(*module);
+    pm.add(dlp);
+#endif // LLVM 3.7+ doesn't have DataLayoutPass anymore.
 
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5) || defined(LLVM_3_6)
     llvm::formatted_raw_ostream fos(of->os());
-
+#else // LLVM 3.7+
+    llvm::raw_fd_ostream &fos(of->os());
+#endif
     if (targetMachine->addPassesToEmitFile(pm, fos, fileType)) {
         fprintf(stderr, "Fatal error adding passes to emit object file!");
         exit(1);
@@ -1113,6 +1522,19 @@ lGetElementStructType(const Type *t) {
     return NULL;
 }
 
+static bool
+lContainsPtrToVarying(const StructType *st) {
+  int numElts = st->GetElementCount();
+
+  for (int j = 0; j < numElts; ++j) {
+    const Type *t = st->GetElementType(j);
+
+    if (t->IsVaryingType()) return true;
+  }
+
+  return false;
+}
+
 
 /** Emits a declaration for the given struct to the given file.  This
     function first makes sure that declarations for any structs that are
@@ -1120,7 +1542,14 @@ lGetElementStructType(const Type *t) {
  */
 static void
 lEmitStructDecl(const StructType *st, std::vector<const StructType *> *emittedStructs,
-                FILE *file) {
+                FILE *file, bool emitUnifs=true) {
+
+    // if we're emitting this for a generic dispatch header file and it's 
+    // struct that only contains uniforms, don't bother if we're emitting uniforms
+    if (!emitUnifs && !lContainsPtrToVarying(st)) {
+      return;
+    }
+
     // Has this struct type already been declared?  (This happens if it's a
     // member of another struct for which we emitted a declaration
     // previously.)
@@ -1133,25 +1562,59 @@ lEmitStructDecl(const StructType *st, std::vector<const StructType *> *emittedSt
         const StructType *elementStructType =
             lGetElementStructType(st->GetElementType(i));
         if (elementStructType != NULL)
-            lEmitStructDecl(elementStructType, emittedStructs, file);
+          lEmitStructDecl(elementStructType, emittedStructs, file, emitUnifs);
     }
 
     // And now it's safe to declare this one
     emittedStructs->push_back(st);
+    
+    fprintf(file, "#ifndef __ISPC_STRUCT_%s__\n",st->GetCStructName().c_str());
+    fprintf(file, "#define __ISPC_STRUCT_%s__\n",st->GetCStructName().c_str());
 
-    fprintf(file, "#ifndef __ISPC_STRUCT_%s__\n",st->GetStructName().c_str());
-    fprintf(file, "#define __ISPC_STRUCT_%s__\n",st->GetStructName().c_str());
-    fprintf(file, "struct %s", st->GetStructName().c_str());
+    char sSOA[48];
+    bool pack, needsAlign = false;
+    llvm::Type *stype = st->LLVMType(g->ctx);
+    llvm::DataLayout *DL = g->target->getDataLayout();
+
+    if (!(pack = llvm::dyn_cast<llvm::StructType>(stype)->isPacked()))
+        for (int i = 0; !needsAlign && (i < st->GetElementCount()); ++i) {
+            const Type *ftype = st->GetElementType(i)->GetAsNonConstType();
+            needsAlign |= ftype->IsVaryingType()
+                       && (CastType<StructType>(ftype) == NULL);
+        }
     if (st->GetSOAWidth() > 0)
         // This has to match the naming scheme in
         // StructType::GetCDeclaration().
-        fprintf(file, "_SOA%d", st->GetSOAWidth());
-    fprintf(file, " {\n");
-
+        sprintf(sSOA, "_SOA%d", st->GetSOAWidth());
+    else
+        *sSOA = '\0';
+    if (!needsAlign)
+        fprintf(file, "%sstruct %s%s {\n", (pack)? "packed " : "",
+                      st->GetCStructName().c_str(), sSOA);
+    else {
+        unsigned uABI = DL->getABITypeAlignment(stype);
+        fprintf(file, "__ISPC_ALIGNED_STRUCT__(%u) %s%s {\n", uABI,
+                      st->GetCStructName().c_str(), sSOA);
+    }
     for (int i = 0; i < st->GetElementCount(); ++i) {
-        const Type *type = st->GetElementType(i)->GetAsNonConstType();
-        std::string d = type->GetCDeclaration(st->GetElementName(i));
-        fprintf(file, "    %s;\n", d.c_str());
+        const Type *ftype = st->GetElementType(i)->GetAsNonConstType();
+        std::string d = ftype->GetCDeclaration(st->GetElementName(i));
+
+        fprintf(file, "    ");
+        if (needsAlign && ftype->IsVaryingType() &&
+           (CastType<StructType>(ftype) == NULL)) {
+            unsigned uABI = DL->getABITypeAlignment(ftype->LLVMType(g->ctx));
+            fprintf(file, "__ISPC_ALIGN__(%u) ", uABI);
+        }
+        // Don't expand arrays, pointers and structures:
+        // their insides will be expanded automatically.
+        if (!ftype->IsArrayType() && !ftype->IsPointerType() &&
+            ftype->IsVaryingType() && (CastType<StructType>(ftype) == NULL)) {
+            fprintf(file, "%s[%d];\n", d.c_str(), g->target->getVectorWidth());
+        }
+        else {
+            fprintf(file, "%s;\n", d.c_str());
+        }
     }
     fprintf(file, "};\n");
     fprintf(file, "#endif\n\n");
@@ -1162,10 +1625,24 @@ lEmitStructDecl(const StructType *st, std::vector<const StructType *> *emittedSt
     header file, emit their declarations.
  */
 static void
-lEmitStructDecls(std::vector<const StructType *> &structTypes, FILE *file) {
+lEmitStructDecls(std::vector<const StructType *> &structTypes, FILE *file, bool emitUnifs=true) {
     std::vector<const StructType *> emittedStructs;
+
+    fprintf(file,
+            "\n#ifndef __ISPC_ALIGN__\n"
+            "#if defined(__clang__) || !defined(_MSC_VER)\n"
+            "// Clang, GCC, ICC\n"
+            "#define __ISPC_ALIGN__(s) __attribute__((aligned(s)))\n"
+            "#define __ISPC_ALIGNED_STRUCT__(s) struct __ISPC_ALIGN__(s)\n"
+            "#else\n"
+            "// Visual Studio\n"
+            "#define __ISPC_ALIGN__(s) __declspec(align(s))\n"
+            "#define __ISPC_ALIGNED_STRUCT__(s) __ISPC_ALIGN__(s) struct\n"
+            "#endif\n"
+            "#endif\n\n");
+
     for (unsigned int i = 0; i < structTypes.size(); ++i)
-        lEmitStructDecl(structTypes[i], &emittedStructs, file);
+        lEmitStructDecl(structTypes[i], &emittedStructs, file, emitUnifs);
 }
 
 
@@ -1191,7 +1668,7 @@ lEmitEnumDecls(const std::vector<const EnumType *> &enumTypes, FILE *file) {
             const Symbol *e = enumTypes[i]->GetEnumerator(j);
             Assert(e->constValue != NULL);
             unsigned int enumValue;
-            int count = e->constValue->AsUInt32(&enumValue);
+            int count = e->constValue->GetValues(&enumValue);
             Assert(count == 1);
 
             // Always print an initializer to set the value.  We could be
@@ -1278,6 +1755,7 @@ lGetExportedTypes(const Type *type,
                   std::vector<const VectorType *> *exportedVectorTypes) {
     const ArrayType *arrayType = CastType<ArrayType>(type);
     const StructType *structType = CastType<StructType>(type);
+    const FunctionType *ftype = CastType<FunctionType>(type);
 
     if (CastType<ReferenceType>(type) != NULL)
         lGetExportedTypes(type->GetReferenceTarget(), exportedStructTypes,
@@ -1301,7 +1779,17 @@ lGetExportedTypes(const Type *type,
         lAddTypeIfNew(type, exportedEnumTypes);
     else if (CastType<VectorType>(type) != NULL)
         lAddTypeIfNew(type, exportedVectorTypes);
-    else
+    else if (ftype != NULL) {
+        // Handle Return Types
+        lGetExportedTypes(ftype->GetReturnType(), exportedStructTypes,
+                          exportedEnumTypes, exportedVectorTypes);
+
+        // And now the parameter types...
+        for (int j = 0; j < ftype->GetNumParameters(); ++j)
+            lGetExportedTypes(ftype->GetParameterType(j), exportedStructTypes,
+                              exportedEnumTypes, exportedVectorTypes);
+    }
+    else 
         Assert(CastType<AtomicType>(type) != NULL);
 }
 
@@ -1330,19 +1818,25 @@ lGetExportedParamTypes(const std::vector<Symbol *> &funcs,
 
 static void
 lPrintFunctionDeclarations(FILE *file, const std::vector<Symbol *> &funcs,
-                           bool useExternC=1) {
+                           bool useExternC=1, bool rewriteForDispatch=false) {
   if (useExternC)
-    fprintf(file, "#if defined(__cplusplus) && !defined(__ISPC_NO_EXTERN_C)\nextern \"C\" {\n#endif // __cplusplus\n");
+    fprintf(file, "#if defined(__cplusplus) && (! defined(__ISPC_NO_EXTERN_C) || !__ISPC_NO_EXTERN_C )\nextern \"C\" {\n#endif // __cplusplus\n");
     // fprintf(file, "#ifdef __cplusplus\nextern \"C\" {\n#endif // __cplusplus\n");
   for (unsigned int i = 0; i < funcs.size(); ++i) {
     const FunctionType *ftype = CastType<FunctionType>(funcs[i]->type);
     Assert(ftype);
-    std::string decl = ftype->GetCDeclaration(funcs[i]->name);
+    std::string decl;
+    if (rewriteForDispatch) {
+      decl = ftype->GetCDeclarationForDispatch(funcs[i]->name);
+    }
+    else {
+      decl = ftype->GetCDeclaration(funcs[i]->name);
+    }
     fprintf(file, "    extern %s;\n", decl.c_str());
   }
   if (useExternC)
 
-    fprintf(file, "#if defined(__cplusplus) && !defined(__ISPC_NO_EXTERN_C)\n} /* end extern C */\n#endif // __cplusplus\n");
+    fprintf(file, "#if defined(__cplusplus) && (! defined(__ISPC_NO_EXTERN_C) || !__ISPC_NO_EXTERN_C )\n} /* end extern C */\n#endif // __cplusplus\n");
     // fprintf(file, "#ifdef __cplusplus\n} /* end extern C */\n#endif // __cplusplus\n");
 }
 
@@ -1783,6 +2277,137 @@ Module::writeHeader(const char *fn) {
     return true;
 }
 
+struct DispatchHeaderInfo {
+  bool EmitUnifs;
+  bool EmitFuncs;
+  bool EmitFrontMatter;
+  bool EmitBackMatter;
+  bool Emit4;
+  bool Emit8;
+  bool Emit16;
+  FILE *file;
+  const char *fn;
+};
+
+bool
+Module::writeDispatchHeader(DispatchHeaderInfo *DHI) {
+  FILE *f = DHI->file;
+  
+  if (DHI->EmitFrontMatter) {
+    fprintf(f, "//\n// %s\n// (Header automatically generated by the ispc compiler.)\n", DHI->fn);
+    fprintf(f, "// DO NOT EDIT THIS FILE.\n//\n\n");
+  }
+    // Create a nice guard string from the filename, turning any
+    // non-number/letter characters into underbars
+    std::string guard = "ISPC_";
+    const char *p = DHI->fn;
+    while (*p) {
+        if (isdigit(*p))
+            guard += *p;
+        else if (isalpha(*p))
+            guard += toupper(*p);
+        else
+            guard += "_";
+        ++p;
+    }
+    if (DHI->EmitFrontMatter) {
+      fprintf(f, "#ifndef %s\n#define %s\n\n", guard.c_str(), guard.c_str());
+
+      fprintf(f, "#include <stdint.h>\n\n");
+
+
+      if (g->emitInstrumentation) {
+        fprintf(f, "#define ISPC_INSTRUMENTATION 1\n");
+        fprintf(f, "extern \"C\" {\n");
+        fprintf(f, "  void ISPCInstrument(const char *fn, const char *note, int line, uint64_t mask);\n");
+        fprintf(f, "}\n");
+      }
+
+      // end namespace
+      fprintf(f, "\n");
+      fprintf(f, "\n#ifdef __cplusplus\nnamespace ispc { /* namespace */\n#endif // __cplusplus\n\n");
+      DHI->EmitFrontMatter = false;
+    }
+
+
+    // Collect single linear arrays of the exported and extern "C"
+    // functions
+    std::vector<Symbol *> exportedFuncs, externCFuncs;
+    m->symbolTable->GetMatchingFunctions(lIsExported, &exportedFuncs);
+    m->symbolTable->GetMatchingFunctions(lIsExternC, &externCFuncs);
+     
+    int programCount = g->target->getVectorWidth();
+    
+    if ((DHI->Emit4 && (programCount == 4)) || 
+        (DHI->Emit8 && (programCount == 8)) ||
+        (DHI->Emit16 && (programCount == 16))) {
+        // Get all of the struct, vector, and enumerant types used as function
+        // parameters.  These vectors may have repeats.
+        std::vector<const StructType *> exportedStructTypes;
+        std::vector<const EnumType *> exportedEnumTypes;
+        std::vector<const VectorType *> exportedVectorTypes;
+        lGetExportedParamTypes(exportedFuncs, &exportedStructTypes,
+                               &exportedEnumTypes, &exportedVectorTypes);
+        lGetExportedParamTypes(externCFuncs, &exportedStructTypes,
+                               &exportedEnumTypes, &exportedVectorTypes);
+        
+        // Go through the explicitly exported types
+        for (int i = 0; i < (int)exportedTypes.size(); ++i) {
+          if (const StructType *st = CastType<StructType>(exportedTypes[i].first))
+            exportedStructTypes.push_back(st->GetAsUniformType());
+          else if (const EnumType *et = CastType<EnumType>(exportedTypes[i].first))
+            exportedEnumTypes.push_back(et->GetAsUniformType());
+          else if (const VectorType *vt = CastType<VectorType>(exportedTypes[i].first))
+            exportedVectorTypes.push_back(vt->GetAsUniformType());
+          else
+            FATAL("Unexpected type in export list");
+        }
+
+        
+        // And print them
+        if (DHI->EmitUnifs) {
+          lEmitVectorTypedefs(exportedVectorTypes, f);
+          lEmitEnumDecls(exportedEnumTypes, f);
+        }
+        lEmitStructDecls(exportedStructTypes, f, DHI->EmitUnifs);
+        
+        // Update flags
+        DHI->EmitUnifs = false;
+        if (programCount == 4) {
+          DHI->Emit4 = false;
+        } 
+        else if (programCount == 8) {
+          DHI->Emit8 = false;
+        }
+        else if (programCount == 16) {
+          DHI->Emit16 = false;
+        }
+    }
+    if (DHI->EmitFuncs) {
+      // emit function declarations for exported stuff...
+      if (exportedFuncs.size() > 0) {
+        fprintf(f, "\n");
+        fprintf(f, "///////////////////////////////////////////////////////////////////////////\n");
+        fprintf(f, "// Functions exported from ispc code\n");
+        fprintf(f, "///////////////////////////////////////////////////////////////////////////\n");
+        lPrintFunctionDeclarations(f, exportedFuncs, 1, true);
+        fprintf(f, "\n");
+      }
+      DHI->EmitFuncs = false;
+    }
+
+    if (DHI->EmitBackMatter) {
+      // end namespace
+      fprintf(f, "\n");
+      fprintf(f, "\n#ifdef __cplusplus\n} /* namespace */\n#endif // __cplusplus\n");
+      
+      // end guard
+      fprintf(f, "\n#endif // %s\n", guard.c_str());
+      DHI->EmitBackMatter = false;
+    }
+    
+    return true;
+}
 
 void
 Module::execPreprocessor(const char *infilename, llvm::raw_string_ostream *ostream) const
@@ -1792,53 +2417,55 @@ Module::execPreprocessor(const char *infilename, llvm::raw_string_ostream *ostre
 
     llvm::raw_fd_ostream stderrRaw(2, false);
 
-#if defined(LLVM_3_1)
-    clang::TextDiagnosticPrinter *diagPrinter =
-        new clang::TextDiagnosticPrinter(stderrRaw, clang::DiagnosticOptions());
-#else
     clang::DiagnosticOptions *diagOptions = new clang::DiagnosticOptions();
     clang::TextDiagnosticPrinter *diagPrinter =
         new clang::TextDiagnosticPrinter(stderrRaw, diagOptions);
-#endif
+    
     llvm::IntrusiveRefCntPtr<clang::DiagnosticIDs> diagIDs(new clang::DiagnosticIDs);
-#if defined(LLVM_3_1)
-    clang::DiagnosticsEngine *diagEngine =
-        new clang::DiagnosticsEngine(diagIDs, diagPrinter);
-#else
     clang::DiagnosticsEngine *diagEngine =
         new clang::DiagnosticsEngine(diagIDs, diagOptions, diagPrinter);
-#endif
+    
     inst.setDiagnostics(diagEngine);
 
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4)
     clang::TargetOptions &options = inst.getTargetOpts();
+#else // LLVM 3.5+
+    const std::shared_ptr< clang::TargetOptions > &options = 
+          std::make_shared< clang::TargetOptions >(inst.getTargetOpts());
+#endif
+
     llvm::Triple triple(module->getTargetTriple());
     if (triple.getTriple().empty()) {
         triple.setTriple(llvm::sys::getDefaultTargetTriple());
     }
-    options.Triple = triple.getTriple();
 
-#if defined(LLVM_3_1) || defined(LLVM_3_2)
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4)
+    options.Triple = triple.getTriple();
+#else // LLVM 3.5+
+   options->Triple = triple.getTriple();
+#endif
+
+#if defined(LLVM_3_2)
     clang::TargetInfo *target =
         clang::TargetInfo::CreateTargetInfo(inst.getDiagnostics(), options);
-#else // LLVM 3.3+
+#elif defined(LLVM_3_3) || defined(LLVM_3_4)
     clang::TargetInfo *target =
         clang::TargetInfo::CreateTargetInfo(inst.getDiagnostics(), &options);
+#else // LLVM 3.5+
+    clang::TargetInfo *target =
+        clang::TargetInfo::CreateTargetInfo(inst.getDiagnostics(), options);
 #endif
 
     inst.setTarget(target);
     inst.createSourceManager(inst.getFileManager());
-#if defined(LLVM_3_1)
-    inst.InitializeSourceManager(infilename);
-#else
     clang::FrontendInputFile inputFile(infilename, clang::IK_None);
     inst.InitializeSourceManager(inputFile);
-#endif
 
     // Don't remove comments in the preprocessor, so that we can accurately
     // track the source file position by handling them ourselves.
     inst.getPreprocessorOutputOpts().ShowComments = 1;
 
-#if !defined(LLVM_3_1) && !defined(LLVM_3_2) // LLVM 3.3+
+#if !defined(LLVM_3_2) // LLVM 3.3+
     inst.getPreprocessorOutputOpts().ShowCPP = 1;
 #endif
 
@@ -1850,7 +2477,7 @@ Module::execPreprocessor(const char *infilename, llvm::raw_string_ostream *ostre
         headerOpts.Verbose = 1;
     for (int i = 0; i < (int)g->includePath.size(); ++i) {
         headerOpts.AddPath(g->includePath[i], clang::frontend::Angled,
-#if defined(LLVM_3_1) || defined(LLVM_3_2)
+#if defined(LLVM_3_2)
                            true /* is user supplied */,
 #endif
                            false /* not a framework */,
@@ -1869,6 +2496,7 @@ Module::execPreprocessor(const char *infilename, llvm::raw_string_ostream *ostre
     char *p = targetMacro;
     while (*p) {
         *p = toupper(*p);
+        if (*p == '-') *p = '_';
         ++p;
     }
     opts.addMacroDef(targetMacro);
@@ -1903,13 +2531,36 @@ Module::execPreprocessor(const char *infilename, llvm::raw_string_ostream *ostre
             opts.addMacroDef(g->cppArgs[i].substr(2));
         }
     }
-
-#if defined(LLVM_3_1)
-    inst.getLangOpts().BCPLComment = 1;
-#else
-    inst.getLangOpts().LineComment = 1;
+#ifdef ISPC_NVPTX_ENABLED
+    if (g->target->getISA() == Target::NVPTX)
+    {
+      opts.addMacroDef("__NVPTX__");
+      opts.addMacroDef("programIndex=__programIndex()");
+#if 1
+      opts.addMacroDef("cif=if");
+      opts.addMacroDef("cfor=for");
+      opts.addMacroDef("cwhile=while");
+      opts.addMacroDef("ccontinue=continue");
+      opts.addMacroDef("cdo=do");
 #endif
+      opts.addMacroDef("taskIndex0=__taskIndex0()");
+      opts.addMacroDef("taskIndex1=__taskIndex1()");
+      opts.addMacroDef("taskIndex2=__taskIndex2()");
+      opts.addMacroDef("taskIndex=__taskIndex()");
+      opts.addMacroDef("taskCount0=__taskCount0()");
+      opts.addMacroDef("taskCount1=__taskCount1()");
+      opts.addMacroDef("taskCount2=__taskCount2()");
+      opts.addMacroDef("taskCount=__taskCount()");
+    }
+#endif /* ISPC_NVPTX_ENABLED */
+
+    inst.getLangOpts().LineComment = 1;
+
+#if !defined(LLVM_3_2) && !defined(LLVM_3_3) && !defined(LLVM_3_4) // LLVM 3.5+
+    inst.createPreprocessor(clang::TU_Complete);
+#else
     inst.createPreprocessor();
+#endif
 
     diagPrinter->BeginSourceFile(inst.getLangOpts(), &inst.getPreprocessor());
     clang::DoPrintPreprocessedInput(inst.getPreprocessor(),
@@ -1922,7 +2573,7 @@ Module::execPreprocessor(const char *infilename, llvm::raw_string_ostream *ostre
 // "avx", return a string with the ISA name inserted before the original
 // filename's suffix, like "foo_avx.obj".
 static std::string
-lGetTargetFileName(const char *outFileName, const char *isaString) {
+lGetTargetFileName(const char *outFileName, const char *isaString, bool forceCXX) {
     char *targetOutFileName = new char[strlen(outFileName) + 16];
     if (strrchr(outFileName, '.') != NULL) {
         // Copy everything up to the last '.'
@@ -1934,8 +2585,11 @@ lGetTargetFileName(const char *outFileName, const char *isaString) {
         strcat(targetOutFileName, "_");
         strcat(targetOutFileName, isaString);
 
-        // And finish with the original file suffiz
-        strcat(targetOutFileName, strrchr(outFileName, '.'));
+        // And finish with the original file suffix if it is not *-generic target
+        if (!forceCXX)
+            strcat(targetOutFileName, strrchr(outFileName, '.'));
+        else
+            strcat(targetOutFileName, ".cpp");
     }
     else {
         // Can't find a '.' in the filename, so just append the ISA suffix
@@ -1943,6 +2597,10 @@ lGetTargetFileName(const char *outFileName, const char *isaString) {
         strcpy(targetOutFileName, outFileName);
         strcat(targetOutFileName, "_");
         strcat(targetOutFileName, isaString);
+        
+        // Append ".cpp" suffix to the original file if it is *-generic target
+        if (forceCXX)
+            strcat(targetOutFileName, ".cpp");
     }
     return targetOutFileName;
 }
@@ -1979,13 +2637,16 @@ lSymbolIsExported(const Symbol *s) {
 // llvm::Function that were compiled for different compilation target ISAs.
 struct FunctionTargetVariants {
     FunctionTargetVariants() {
-        for (int i = 0; i < Target::NUM_ISAS; ++i)
+      for (int i = 0; i < Target::NUM_ISAS; ++i) {
             func[i] = NULL;
+            FTs[i] = NULL;
+      }
     }
     // The func array is indexed with the Target::ISA enumerant.  Some
     // values may be NULL, indicating that the original function wasn't
     // compiled to the corresponding target ISA.
     llvm::Function *func[Target::NUM_ISAS];
+    const FunctionType *FTs[Target::NUM_ISAS];
 };
 
 
@@ -2000,6 +2661,7 @@ lGetExportedFunctions(SymbolTable *symbolTable,
     for (unsigned int i = 0; i < syms.size(); ++i) {
         FunctionTargetVariants &ftv = functions[syms[i]->name];
         ftv.func[g->target->getISA()] = syms[i]->exportedFunction;
+        ftv.FTs[g->target->getISA()] = CastType<FunctionType>(syms[i]->type);
     }
 }
 
@@ -2095,7 +2757,7 @@ lAddExtractedGlobals(llvm::Module *module,
                 // example, this happens with varying globals if we compile
                 // to different vector widths.
                 if (gv2->getType() != gv->getType())
-                    Error(rgi.pos, "Mismatch in size/layout of global "
+                    Warning(rgi.pos, "Mismatch in size/layout of global "
                           "variable \"%s\" with different targets. "
                           "Globals must not include \"varying\" types or arrays "
                           "with size based on programCount when compiling to "
@@ -2106,6 +2768,51 @@ lAddExtractedGlobals(llvm::Module *module,
     }
 }
 
+static llvm::FunctionType *
+lGetVaryingDispatchType(FunctionTargetVariants &funcs) {
+  llvm::Type *ptrToInt8Ty = llvm::Type::getInt8PtrTy(*g->ctx);
+  llvm::FunctionType *resultFuncTy = NULL;
+
+  for (int i = 0; i < Target::NUM_ISAS; ++i) {
+    if (funcs.func[i] == NULL)  {
+      continue;
+    }
+    else {
+      bool foundVarying = false;
+      const FunctionType *ft = funcs.FTs[i];
+      resultFuncTy = funcs.func[i]->getFunctionType();
+
+      int numArgs = ft->GetNumParameters();
+      llvm::SmallVector<llvm::Type *, 8> ftype;
+      for (int j = 0; j < numArgs; ++j) {
+        ftype.push_back(resultFuncTy->getParamType(j));
+      }
+
+      for (int j = 0; j < numArgs; ++j) {
+        const Type *arg = ft->GetParameterType(j);
+
+        if (arg->IsPointerType()) {
+          const Type *baseType = CastType<PointerType>(arg)->GetBaseType();
+          // For each varying type pointed to, swap the LLVM pointer type
+          // with i8 * (as close as we can get to void *)
+          if (baseType->IsVaryingType()) {
+            ftype[j] = ptrToInt8Ty;
+            foundVarying = true;
+          }
+        }
+      }
+      if (foundVarying) {
+        resultFuncTy = llvm::FunctionType::get(resultFuncTy->getReturnType(), ftype, false);
+      }
+    }
+  }
+  
+  // We should've found at least one variant here
+  // or else something fishy is going on.
+  Assert(resultFuncTy);
+  
+  return resultFuncTy;
+}
 
 /** Create the dispatch function for an exported ispc function.
     This function checks to see which vector ISAs the system the
@@ -2133,27 +2840,24 @@ lCreateDispatchFunction(llvm::Module *module, llvm::Function *setISAFunc,
     // we'll start by generating an 'extern' declaration of each one that
     // we have in the current module so that we can then call out to that.
     llvm::Function *targetFuncs[Target::NUM_ISAS];
-    llvm::FunctionType *ftype = NULL;
 
+    // New helper function checks to see if we need to rewrite the
+    // type for the dispatch function in case of pointers to varyings
+    llvm::FunctionType *ftype = lGetVaryingDispatchType(funcs);
+
+    // Now we insert type-punned declarations for dispatched functions.
+    // This is needed when compiling modules for a set of architectures
+    // with different vector lengths. Due to restrictions, the return
+    // type is the same across all architectures, however in different
+    // modules it may have dissimilar names. The loop below works this
+    // around.
     for (int i = 0; i < Target::NUM_ISAS; ++i) {
-        if (funcs.func[i] == NULL) {
+        if (funcs.func[i])
+            targetFuncs[i] =
+                llvm::Function::Create(ftype, llvm::GlobalValue::ExternalLinkage,
+                                       funcs.func[i]->getName(), module);
+        else
             targetFuncs[i] = NULL;
-            continue;
-        }
-
-        // Grab the type of the function as well.  Note that the various
-        // functions will have different types if they have arguments that
-        // are pointers to structs, due to the fact that we mangle LLVM
-        // struct type names with the target vector width.  However,
-        // because we only allow uniform stuff to pass through the
-        // export'ed function layer, they should all have the same memory
-        // layout, so this is benign..
-        if (ftype == NULL)
-            ftype = funcs.func[i]->getFunctionType();
-
-        targetFuncs[i] =
-            llvm::Function::Create(ftype, llvm::GlobalValue::ExternalLinkage,
-                                   funcs.func[i]->getName(), module);
     }
 
     bool voidReturn = ftype->getReturnType()->isVoidTy();
@@ -2169,7 +2873,7 @@ lCreateDispatchFunction(llvm::Module *module, llvm::Function *setISAFunc,
     // ISA and sets __system_best_isa, if it hasn't been set yet.
     llvm::CallInst::Create(setISAFunc, "", bblock);
 
-    // Now we can load the system's ISA enuemrant
+    // Now we can load the system's ISA enumerant
     llvm::Value *systemISA =
         new llvm::LoadInst(systemBestISAPtr, "system_isa", bblock);
 
@@ -2184,11 +2888,26 @@ lCreateDispatchFunction(llvm::Module *module, llvm::Function *setISAFunc,
             continue;
 
         // Emit code to see if the system can run the current candidate
-        // variant successfully--"is the system's ISA enuemrant value >=
+        // variant successfully--"is the system's ISA enumerant value >=
         // the enumerant value of the current candidate?"
+
+        // dispatchNum is needed to separate generic from *-generic target
+        int dispatchNum = i;
+        if ((Target::ISA)(i == Target::GENERIC) && 
+            !g->target->getTreatGenericAsSmth().empty()) {
+            if (g->target->getTreatGenericAsSmth() == "knl_generic")
+                dispatchNum = Target::KNL;
+            else if (g->target->getTreatGenericAsSmth() == "skx_generic")
+                dispatchNum = Target::SKX;
+            else {
+                Error(SourcePos(), "*-generic target can be called only with knl or skx");
+                exit(1);
+            }
+        }
+
         llvm::Value *ok =
             llvm::CmpInst::Create(llvm::Instruction::ICmp, llvm::CmpInst::ICMP_SGE,
-                                  systemISA, LLVMInt32(i), "isa_ok", bblock);
+                                  systemISA, LLVMInt32(dispatchNum), "isa_ok", bblock);
         llvm::BasicBlock *callBBlock =
             llvm::BasicBlock::Create(*g->ctx, "do_call", dispatchFunc);
         llvm::BasicBlock *nextBBlock =
@@ -2200,8 +2919,20 @@ lCreateDispatchFunction(llvm::Module *module, llvm::Function *setISAFunc,
         // the target-specific function.
         std::vector<llvm::Value *> args;
         llvm::Function::arg_iterator argIter = dispatchFunc->arg_begin();
-        for (; argIter != dispatchFunc->arg_end(); ++argIter)
+        llvm::Function::arg_iterator targsIter = targetFuncs[i]->arg_begin();
+        for (; argIter != dispatchFunc->arg_end(); ++argIter, ++targsIter) {
+          // Check to see if we rewrote any types in the dispatch function.
+          // If so, create bitcasts for the appropriate pointer types.
+          if (argIter->getType() == targsIter->getType()) {
             args.push_back(argIter);
+          }
+          else {
+            llvm::CastInst *argCast = 
+              llvm::CastInst::CreatePointerCast(argIter, targsIter->getType(),
+                                                "dpatch_arg_bitcast", callBBlock);
+            args.push_back(argCast);
+          }
+        }
         if (voidReturn) {
             llvm::CallInst::Create(targetFuncs[i], args, "", callBBlock);
             llvm::ReturnInst::Create(*g->ctx, callBBlock);
@@ -2238,7 +2969,6 @@ lCreateDispatchFunction(llvm::Module *module, llvm::Function *setISAFunc,
     }
 }
 
-
 // Given a map that holds the mapping from each of the 'export'ed functions
 // in the ispc program to the target-specific variants of the function,
 // create a llvm::Module that has a dispatch function for each exported
@@ -2269,7 +2999,12 @@ lCreateDispatchModule(std::map<std::string, FunctionTargetVariants> &functions) 
 
     // Do some rudimentary cleanup of the final result and make sure that
     // the module is all ok.
+
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5) || defined(LLVM_3_6)
     llvm::PassManager optPM;
+#else // LLVM 3.7+
+    llvm::legacy::PassManager optPM;
+#endif
     optPM.add(llvm::createGlobalDCEPass());
     optPM.add(llvm::createVerifierPass());
     optPM.run(*module);
@@ -2277,6 +3012,32 @@ lCreateDispatchModule(std::map<std::string, FunctionTargetVariants> &functions) 
     return module;
 }
 
+
+#ifdef ISPC_NVPTX_ENABLED
+static std::string lCBEMangle(const std::string &S) 
+{
+  std::string Result;
+
+  for (unsigned i = 0, e = S.size(); i != e; ++i) {
+    if (i+1 != e && ((S[i] == '>' && S[i+1] == '>') ||
+                     (S[i] == '<' && S[i+1] == '<'))) {
+      Result += '_';
+      Result += 'A'+(S[i]&15);
+      Result += 'A'+((S[i]>>4)&15);
+      Result += '_';
+      i++;
+    } else if (isalnum(S[i]) || S[i] == '_' || S[i] == '<' || S[i] == '>') {
+      Result += S[i];
+    } else {
+      Result += '_';
+      Result += 'A'+(S[i]&15);
+      Result += 'A'+((S[i]>>4)&15);
+      Result += '_';
+    }
+  }
+  return Result;
+}
+#endif /* ISPC_NVPTX_ENABLED */
 
 int
 Module::CompileAndOutput(const char *srcFile,
@@ -2300,15 +3061,43 @@ Module::CompileAndOutput(const char *srcFile,
 
         m = new Module(srcFile);
         if (m->CompileFile() == 0) {
+#ifdef ISPC_NVPTX_ENABLED
+            /* NVPTX:
+             * for PTX target replace '.' with '_' in all global variables 
+             * a PTX identifier name must match [a-zA-Z$_][a-zA-Z$_0-9]*
+             */
+            if (g->target->getISA() == Target::NVPTX)
+            {
+              /* mangle global variables names */
+              {
+                llvm::Module::global_iterator I = m->module->global_begin(), E = m->module->global_end();
+                for (; I != E; I++)
+                  I->setName(lCBEMangle(I->getName()));
+              }
+
+              /* mangle functions names */
+              {
+                llvm::Module::iterator I = m->module->begin(), E = m->module->end();
+                for (; I != E; I++)
+                {
+                  std::string str = I->getName();
+                  if (str.find("operator") != std::string::npos)
+                    I->setName(lCBEMangle(str));
+                }
+              }
+            }
+#endif /* ISPC_NVPTX_ENABLED */
             if (outputType == CXX) {
-                if (target == NULL || strncmp(target, "generic-", 8) != 0) {
+                if (target == NULL || (strncmp(target, "generic-", 8) != 0
+                    && strstr(target, "-generic-") == NULL)) {
                     Error(SourcePos(), "When generating C++ output, one of the \"generic-*\" "
                           "targets must be used.");
                     return 1;
                 }
             }
             else if (outputType == Asm || outputType == Object) {
-                if (target != NULL && strncmp(target, "generic-", 8) == 0) {
+                if (target != NULL && 
+                   (strncmp(target, "generic-", 8) == 0 || strstr(target, "-generic-") != NULL)) {
                     Error(SourcePos(), "When using a \"generic-*\" compilation target, "
                           "%s output can not be used.",
                           (outputType == Asm) ? "assembly" : "object file");
@@ -2378,10 +3167,38 @@ Module::CompileAndOutput(const char *srcFile,
         std::map<std::string, FunctionTargetVariants> exportedFunctions;
         std::vector<RewriteGlobalInfo> globals[Target::NUM_ISAS];
         int errorCount = 0;
+        
+        // Handle creating a "generic" header file for multiple targets
+        // that use exported varyings
+        DispatchHeaderInfo DHI;
+        if ((targets.size() > 1) && (headerFileName != NULL)) {
+          DHI.file  = fopen(headerFileName, "w");
+          if (!DHI.file) {
+            perror("fopen");
+            return false;
+          }
+          DHI.fn = headerFileName;
+          DHI.EmitUnifs = true;
+          DHI.EmitFuncs = true;
+          DHI.EmitFrontMatter = true;
+          DHI.Emit4 = true;
+          DHI.Emit8 = true;
+          DHI.Emit16 = true;
+          // This is toggled later.
+          DHI.EmitBackMatter = false;
+        }
+
+        // Variable is needed later for approptiate dispatch function.
+        // It indicates if we have *-generic target. 
+        std::string treatGenericAsSmth = "";
+
         for (unsigned int i = 0; i < targets.size(); ++i) {
             g->target = new Target(arch, cpu, targets[i].c_str(), generatePIC);
             if (!g->target->isValid())
                 return 1;
+
+            if (!g->target->getTreatGenericAsSmth().empty())
+                treatGenericAsSmth = g->target->getTreatGenericAsSmth();
 
             // Issue an error if we've already compiled to a variant of
             // this target ISA.  (It doesn't make sense to compile to both
@@ -2403,20 +3220,52 @@ Module::CompileAndOutput(const char *srcFile,
                 lExtractAndRewriteGlobals(m->module, &globals[i]);
 
                 if (outFileName != NULL) {
-                    const char *isaName = g->target->GetISAString();
-                    std::string targetOutFileName =
-                        lGetTargetFileName(outFileName, isaName);
-                    if (!m->writeOutput(outputType, targetOutFileName.c_str()))
-                        return 1;
+                    std::string targetOutFileName;
+                    // We always generate cpp file for *-generic target during multitarget compilation
+                    if (g->target->getISA() == Target::GENERIC && 
+                        !g->target->getTreatGenericAsSmth().empty()) {
+                        targetOutFileName = lGetTargetFileName(outFileName, 
+                                                g->target->getTreatGenericAsSmth().c_str(), true);
+                        if (!m->writeOutput(CXX, targetOutFileName.c_str(), includeFileName))
+                            return 1;
+                    }
+                    else {
+                        const char *isaName = g->target->GetISAString();
+                        targetOutFileName = lGetTargetFileName(outFileName, isaName, false);
+                        if (!m->writeOutput(outputType, targetOutFileName.c_str()))
+                            return 1;
+                    }
                 }
             }
             errorCount += m->errorCount;
 
             // Only write the generate header file, if desired, the first
             // time through the loop here.
-            if (i == 0 && headerFileName != NULL)
-                if (!m->writeOutput(Module::Header, headerFileName))
-                    return 1;
+            if (headerFileName != NULL) {
+              if (i == targets.size()-1) {
+                // only print backmatter on the last target.
+                DHI.EmitBackMatter = true;
+              }
+              
+              const char *isaName;
+              if (g->target->getISA() == Target::GENERIC &&
+                        !g->target->getTreatGenericAsSmth().empty())
+                  isaName = g->target->getTreatGenericAsSmth().c_str();
+              else 
+                  isaName = g->target->GetISAString();
+              std::string targetHeaderFileName = 
+                lGetTargetFileName(headerFileName, isaName, false);
+              // write out a header w/o target name for the first target only
+              if (!m->writeOutput(Module::Header, headerFileName, "", &DHI)) {
+                return 1;
+              }
+              if (!m->writeOutput(Module::Header, targetHeaderFileName.c_str())) {
+                return 1;
+              }
+              if (i == targets.size()-1) {
+                fclose(DHI.file);
+              }
+            }
 
             delete g->target;
             g->target = NULL;
@@ -2434,12 +3283,12 @@ Module::CompileAndOutput(const char *srcFile,
         int i = 0;
         const char *firstISA;
         while (i < Target::NUM_ISAS && firstTargetMachine == NULL) {
-            firstISA = Target::ISAToString((Target::ISA) i);
+            firstISA = Target::ISAToTargetString((Target::ISA) i);
             firstTargetMachine = targetMachines[i++];
         }
         Assert(firstTargetMachine != NULL);
 
-        g->target = new Target(arch, cpu, firstISA, generatePIC);
+        g->target = new Target(arch, cpu, firstISA, generatePIC, treatGenericAsSmth);
         if (!g->target->isValid()) {
             return 1;
         }
@@ -2456,6 +3305,10 @@ Module::CompileAndOutput(const char *srcFile,
                 writeObjectFileOrAssembly(firstTargetMachine, dispatchModule,
                                           outputType, outFileName);
         }
+
+        if (depsFileName != NULL)
+            if (!m->writeOutput(Module::Deps, depsFileName))
+                return 1;
 
         delete g->target;
         g->target = NULL;

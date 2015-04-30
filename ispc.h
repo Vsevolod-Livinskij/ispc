@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2010-2013, Intel Corporation
+  Copyright (c) 2010-2015, Intel Corporation
   All rights reserved.
 
   Redistribution and use in source and binary forms, with or without
@@ -38,10 +38,10 @@
 #ifndef ISPC_H
 #define ISPC_H
 
-#define ISPC_VERSION "1.4.1dev"
+#define ISPC_VERSION "1.8.2dev"
 
-#if !defined(LLVM_3_1) && !defined(LLVM_3_2) && !defined(LLVM_3_3) && !defined(LLVM_3_4)
-#error "Only LLVM 3.1, 3.2, 3.3 and the 3.4 development branch are supported"
+#if !defined(LLVM_3_2) && !defined(LLVM_3_3) && !defined(LLVM_3_4) && !defined(LLVM_3_5) && !defined(LLVM_3_6) && !defined(LLVM_3_7)
+#error "Only LLVM 3.2, 3.3, 3.4, 3.5, 3.6 and 3.7 development branch are supported"
 #endif
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -59,6 +59,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <vector>
+#include <set>
 #include <string>
 
 /** @def ISPC_MAX_NVEC maximum vector size of any of the compliation
@@ -66,21 +67,17 @@
  */
 #define ISPC_MAX_NVEC 64
 
+// Number of final optimization phase
+#define LAST_OPT_NUMBER 1000
+
 // Forward declarations of a number of widely-used LLVM types
 namespace llvm {
     class AttributeSet;
     class BasicBlock;
     class Constant;
     class ConstantValue;
-#if defined(LLVM_3_1)
-    class TargetData;
-#else
     class DataLayout;
-#endif
     class DIBuilder;
-    class DIDescriptor;
-    class DIFile;
-    class DIType;
     class Function;
     class FunctionType;
     class LLVMContext;
@@ -89,6 +86,15 @@ namespace llvm {
     class TargetMachine;
     class Type;
     class Value;
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5) || defined(LLVM_3_6)
+    class DIFile;
+    class DIType;
+    class DIDescriptor;
+#else // LLVM 3.7++
+    class MDFile;
+    class MDType;
+    class MDScope;
+#endif
 }
 
 
@@ -138,8 +144,13 @@ struct SourcePos {
     /** Prints the filename and line/column range to standard output. */
     void Print() const;
 
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5) || defined(LLVM_3_6)
     /** Returns a LLVM DIFile object that represents the SourcePos's file */
     llvm::DIFile GetDIFile() const;
+#else
+    /** Returns a LLVM MDFile object that represents the SourcePos's file */
+    llvm::MDFile *GetDIFile() const;
+#endif
 
     bool operator==(const SourcePos &p2) const;
 };
@@ -175,24 +186,40 @@ public:
         flexible/performant of them will apear last in the enumerant.  Note
         also that __best_available_isa() needs to be updated if ISAs are
         added or the enumerant values are reordered.  */
-    enum ISA { SSE2, SSE4, AVX, AVX11, AVX2, GENERIC, NUM_ISAS };
+    enum ISA {
+        SSE2    = 0,
+        SSE4    = 1,
+        AVX     = 2,
+        AVX11   = 3,
+        AVX2    = 4,
+        KNL     = 5,
+        SKX     = 6,
+        GENERIC = 7,
+#ifdef ISPC_NVPTX_ENABLED
+        NVPTX,
+#endif
+#ifdef ISPC_ARM_ENABLED
+        NEON32, NEON16, NEON8,
+#endif
+        NUM_ISAS
+    };
 
     /** Initializes the given Target pointer for a target of the given
         name, if the name is a known target.  Returns true if the
         target was initialized and false if the name is unknown. */
-    Target(const char *arch, const char *cpu, const char *isa, bool pic);
+    Target(const char *arch, const char *cpu, const char *isa, bool pic, std::string genenricAsSmth = "");
 
     /** Returns a comma-delimited string giving the names of the currently
-        supported target ISAs. */
-    static const char *SupportedTargetISAs();
+        supported compilation targets. */
+    static const char *SupportedTargets();
 
     /** Returns a comma-delimited string giving the names of the currently
-        supported target CPUs. */
-    static std::string SupportedTargetCPUs();
+        supported CPUs. */
+    static std::string SupportedCPUs();
 
     /** Returns a comma-delimited string giving the names of the currently
-        supported target architectures. */
-    static const char *SupportedTargetArchs();
+        supported architectures. */
+    static const char *SupportedArchs();
 
     /** Returns a triple string specifying the target architecture, vendor,
         and environment. */
@@ -205,8 +232,15 @@ public:
     /** Convert ISA enum to string */
     static const char *ISAToString(Target::ISA isa);
 
-    /** Returns a string like "avx" encoding the target. */
+    /** Returns a string like "avx" encoding the target. Good for mangling. */
     const char *GetISAString() const;
+
+    /** Convert ISA enum to string */
+    static const char *ISAToTargetString(Target::ISA isa);
+
+    /** Returns a string like "avx1.1-i32x8" encoding the target.
+        This may be used for Target initialization. */
+    const char *GetISATargetString() const;
 
     /** Returns the size of the given type */
     llvm::Value *SizeOf(llvm::Type *type,
@@ -225,16 +259,14 @@ public:
 
     // Note the same name of method for 3.1 and 3.2+, this allows
     // to reduce number ifdefs on client side.
-#if defined(LLVM_3_1)
-    llvm::TargetData *getDataLayout() const {return m_targetData;}
-#else
     llvm::DataLayout *getDataLayout() const {return m_dataLayout;}
-#endif
 
     /** Reports if Target object has valid state. */
     bool isValid() const {return m_valid;}
 
     ISA getISA() const {return m_isa;}
+
+    std::string getTreatGenericAsSmth() const {return m_treatGenericAsSmth;} 
 
     std::string getArch() const {return m_arch;}
 
@@ -243,6 +275,10 @@ public:
     std::string getCPU() const {return m_cpu;}
 
     int getNativeVectorWidth() const {return m_nativeVectorWidth;}
+
+    int getNativeVectorAlignment() const {return m_nativeVectorAlignment;}
+
+    int getDataTypeWidth() const {return m_dataTypeWidth;}
 
     int getVectorWidth() const {return m_vectorWidth;}
 
@@ -261,6 +297,14 @@ public:
     bool hasScatter() const {return m_hasScatter;}
 
     bool hasTranscendentals() const {return m_hasTranscendentals;}
+    
+    bool hasTrigonometry() const {return m_hasTrigonometry;}
+    
+    bool hasRsqrtd() const {return m_hasRsqrtd;}
+    
+    bool hasRcpd() const {return m_hasRcpd;}
+
+    bool hasVecPrefetch() const {return m_hasVecPrefetch;}
 
 private:
 
@@ -276,12 +320,7 @@ private:
         must not be used.
         */
     llvm::TargetMachine *m_targetMachine;
-
-#if defined(LLVM_3_1)
-    llvm::TargetData *m_targetData;
-#else
     llvm::DataLayout *m_dataLayout;
-#endif
 
     /** flag to report invalid state after construction
         (due to bad parameters passed to constructor). */
@@ -289,6 +328,9 @@ private:
 
     /** Instruction set being compiled to. */
     ISA m_isa;
+
+    /** The variable shows if we use special mangling with generic target. */
+    std::string m_treatGenericAsSmth;
 
     /** Target system architecture.  (e.g. "x86-64", "x86"). */
     std::string m_arch;
@@ -302,7 +344,7 @@ private:
     /** Target-specific attribute string to pass along to the LLVM backend */
     std::string m_attributes;
 
-#if !defined(LLVM_3_1) && !defined(LLVM_3_2)
+#if !defined(LLVM_3_2)
     /** Target-specific LLVM attribute, which has to be attached to every
         function to ensure that it is generated for correct target architecture.
         This is requirement was introduced in LLVM 3.3 */
@@ -310,9 +352,20 @@ private:
 #endif
 
     /** Native vector width of the vector instruction set.  Note that this
-        value is directly derived from the ISA Being used (e.g. it's 4 for
+        value is directly derived from the ISA being used (e.g. it's 4 for
         SSE, 8 for AVX, etc.) */
     int m_nativeVectorWidth;
+
+    /** Native vector alignment in bytes. Theoretically this may be derived
+        from the vector size, but it's better to manage directly the alignement.
+        It allows easier experimenting and better fine tuning for particular
+        platform. This information is primatily used when
+        --opt=force-aligned-memory is used. */
+    int m_nativeVectorAlignment;
+
+    /** Data type with in bits. Typically it's 32, but could be 8, 16 or 64.
+        For generic it's -1, which means undefined. */
+    int m_dataTypeWidth;
 
     /** Actual vector width currently being compiled to.  This may be an
         integer multiple of the native vector width, for example if we're
@@ -349,6 +402,18 @@ private:
     /** Indicates whether the target has support for transcendentals (beyond
         sqrt, which we assume that all of them handle). */
     bool m_hasTranscendentals;
+    
+    /** Indicates whether the target has ISA support for trigonometry */
+    bool m_hasTrigonometry;
+    
+    /** Indicates whether there is an ISA double precision rsqrt. */
+    bool m_hasRsqrtd;
+    
+    /** Indicates whether there is an ISA double precision rcp. */
+    bool m_hasRcpd;
+
+    /** Indicates whether the target has hardware instruction for vector prefetch. */
+    bool m_hasVecPrefetch;
 };
 
 
@@ -494,6 +559,16 @@ struct Globals {
         ispc's execution. */
     bool debugPrint;
 
+    /** Indicates which stages of optimization we want to dump. */
+    std::set<int> debug_stages;
+
+    /** Indicates after which optimization we want to generate
+        DebugIR information. */
+    int debugIR;
+
+    /** Indicates which phases of optimization we want to switch off. */
+    std::set<int> off_stages;
+
     /** Indicates whether all warning messages should be surpressed. */
     bool disableWarnings;
 
@@ -555,6 +630,9 @@ struct Globals {
     /** Indicates that alignment in memory allocation routines should be
         forced to have given value. -1 value means natural alignment for the platforms. */
     int forceAlignment;
+
+    /** When true, flag non-static functions with dllexport attribute on Windows. */
+    bool dllExport;
 };
 
 enum {

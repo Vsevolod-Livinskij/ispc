@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2010-2012, Intel Corporation
+  Copyright (c) 2010-2013, Intel Corporation
   All rights reserved.
 
   Redistribution and use in source and binary forms, with or without
@@ -183,6 +183,81 @@ void __do_print(const char *format, const char *types, int width, uint64_t mask,
     *bufp = '\0';
     fputs(printString, stdout);
     fflush(stdout);
+}
+
+/* this is print for PTX target only */
+int __puts_nvptx(const char *);
+void __do_print_nvptx(const char *format, const char *types, int width, uint64_t mask,
+                void **args) {
+#if 0
+    char printString[PRINT_BUF_SIZE+1]; // +1 for trailing NUL
+    char *bufp = &printString[0];
+    char tmpBuf[256];
+
+    int argCount = 0;
+    while (*format && bufp < &printString[PRINT_BUF_SIZE]) {
+        // Format strings are just single percent signs.
+        if (*format != '%') {
+            *bufp++ = *format;
+        }
+        else {
+            if (*types) {
+                void *ptr = args[argCount++];
+                // Based on the encoding in the types string, cast the
+                // value appropriately and print it with a reasonable
+                // printf() formatting string.
+                switch (*types) {
+                case 'b': {
+                    sprintf(tmpBuf, "%s", *((Bool *)ptr) ? "true" : "false");
+                    APPEND(tmpBuf);
+                    break;
+                }
+                case 'B': {
+                    *bufp++ = '[';
+                    if (bufp == &printString[PRINT_BUF_SIZE])
+                        break;
+                    for (int i = 0; i < width; ++i) {
+                        if (mask & (1ull << i)) {
+                            sprintf(tmpBuf, "%s", ((Bool *)ptr)[i] ? "true" : "false");
+                            APPEND(tmpBuf);
+                        }
+                        else
+                            APPEND("_________");
+                        *bufp++ = (i != width-1) ? ',' : ']';
+                    }
+                    break;
+                }
+                case 'i': PRINT_SCALAR("%d", int);
+                case 'I': PRINT_VECTOR("%d", int);
+                case 'u': PRINT_SCALAR("%u", unsigned int);
+                case 'U': PRINT_VECTOR("%u", unsigned int);
+                case 'f': PRINT_SCALAR("%f", float);
+                case 'F': PRINT_VECTOR("%f", float);
+                case 'l': PRINT_SCALAR("%lld", long long);
+                case 'L': PRINT_VECTOR("%lld", long long);
+                case 'v': PRINT_SCALAR("%llu", unsigned long long);
+                case 'V': PRINT_VECTOR("%llu", unsigned long long);
+                case 'd': PRINT_SCALAR("%f", double);
+                case 'D': PRINT_VECTOR("%f", double);
+                case 'p': PRINT_SCALAR("%p", void *);
+                case 'P': PRINT_VECTOR("%p", void *);
+                default:
+                    APPEND("UNKNOWN TYPE ");
+                    *bufp++ = *types;
+                }
+                ++types;
+            }
+        }
+        ++format;
+    }
+
+ done:
+    *bufp = '\n'; bufp++;
+    *bufp = '\0';
+    __puts_nvptx(printString);
+#else
+    __puts_nvptx("---nvptx printing is not support---\n");
+#endif
 }
 
 

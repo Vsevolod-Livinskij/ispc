@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2010-2013, Intel Corporation
+  Copyright (c) 2010-2015, Intel Corporation
   All rights reserved.
 
   Redistribution and use in source and binary forms, with or without
@@ -38,7 +38,7 @@
 #ifndef ISPC_LLVMUTIL_H
 #define ISPC_LLVMUTIL_H 1
 
-#if defined(LLVM_3_1) || defined(LLVM_3_2)
+#if defined(LLVM_3_2)
   #include <llvm/LLVMContext.h>
   #include <llvm/Type.h>
   #include <llvm/DerivedTypes.h>
@@ -49,6 +49,8 @@
   #include <llvm/IR/DerivedTypes.h>
   #include <llvm/IR/Constants.h>
 #endif
+
+#define PTYPE(p) (llvm::cast<llvm::SequentialType>((p)->getType()->getScalarType())->getElementType())
 
 namespace llvm {
     class PHINode;
@@ -228,7 +230,8 @@ extern llvm::Constant *LLVMMaskAllOff;
 /** Tests to see if all of the elements of the vector in the 'v' parameter
     are equal.  Like lValuesAreEqual(), this is a conservative test and may
     return false for arrays where the values are actually all equal.  */
-extern bool LLVMVectorValuesAllEqual(llvm::Value *v);
+extern bool LLVMVectorValuesAllEqual(llvm::Value *v,
+                                     llvm::Value **splat = NULL);
 
 /** Given vector of integer-typed values, this function returns true if it
     can determine that the elements of the vector have a step of 'stride'
@@ -269,9 +272,13 @@ extern bool LLVMExtractVectorInts(llvm::Value *v, int64_t ret[], int *nElts);
        %broadcast_init.0 = insertelement <4 x i32> undef, i32 %val, i32 0
        %broadcast.1 = shufflevector <4 x i32> %smear.0, <4 x i32> undef,
                                                   <4 x i32> zeroinitializer
+    Function returns:
+    Compare all elements and return one of them if all are equal, otherwise NULL.
+    If compare argument is false, don't do compare and return first element instead.
+    If undef argument is true, ignore undef elements (but all undef yields NULL anyway).
  */
-extern void LLVMFlattenInsertChain(llvm::Value *inst, int vectorWidth,
-                                   llvm::Value **elements);
+extern llvm::Value * LLVMFlattenInsertChain (llvm::Value *inst, int vectorWidth,
+    bool compare = true, bool undef = true);
 
 /** This is a utility routine for debugging that dumps out the given LLVM
     value as well as (recursively) all of the other values that it depends

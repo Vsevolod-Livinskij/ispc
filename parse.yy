@@ -83,7 +83,7 @@ struct ForeachDimension;
 #include "util.h"
 
 #include <stdio.h>
-#if defined(LLVM_3_1) || defined(LLVM_3_2)
+#if defined(LLVM_3_2)
   #include <llvm/Constants.h>
 #else
   #include <llvm/IR/Constants.h>
@@ -149,7 +149,8 @@ struct ForeachDimension {
 
 %union {
     uint64_t intVal;
-    float floatVal;
+    float  floatVal;
+    double doubleVal;
     std::string *stringVal;
     const char *constCharPtr;
 
@@ -179,11 +180,13 @@ struct ForeachDimension {
 }
 
 
+%token TOKEN_INT8_CONSTANT TOKEN_UINT8_CONSTANT
+%token TOKEN_INT16_CONSTANT TOKEN_UINT16_CONSTANT
 %token TOKEN_INT32_CONSTANT TOKEN_UINT32_CONSTANT
 %token TOKEN_INT64_CONSTANT TOKEN_UINT64_CONSTANT
 %token TOKEN_INT32DOTDOTDOT_CONSTANT TOKEN_UINT32DOTDOTDOT_CONSTANT
 %token TOKEN_INT64DOTDOTDOT_CONSTANT TOKEN_UINT64DOTDOTDOT_CONSTANT
-%token TOKEN_FLOAT_CONSTANT TOKEN_STRING_C_LITERAL
+%token TOKEN_FLOAT_CONSTANT TOKEN_DOUBLE_CONSTANT TOKEN_STRING_C_LITERAL
 %token TOKEN_IDENTIFIER TOKEN_STRING_LITERAL TOKEN_TYPE_NAME TOKEN_NULL
 %token TOKEN_PTR_OP TOKEN_INC_OP TOKEN_DEC_OP TOKEN_LEFT_OP TOKEN_RIGHT_OP
 %token TOKEN_LE_OP TOKEN_GE_OP TOKEN_EQ_OP TOKEN_NE_OP
@@ -291,6 +294,22 @@ primary_expression
             Error(@1, "Undeclared symbol \"%s\".%s", name, alts.c_str());
         }
     }
+    | TOKEN_INT8_CONSTANT {
+        $$ = new ConstExpr(AtomicType::UniformInt8->GetAsConstType(),
+                           (int8_t)yylval.intVal, @1);
+    }
+    | TOKEN_UINT8_CONSTANT {
+        $$ = new ConstExpr(AtomicType::UniformUInt8->GetAsConstType(),
+                           (uint8_t)yylval.intVal, @1);
+    }
+    | TOKEN_INT16_CONSTANT {
+        $$ = new ConstExpr(AtomicType::UniformInt16->GetAsConstType(),
+                           (int16_t)yylval.intVal, @1);
+    }
+    | TOKEN_UINT16_CONSTANT {
+        $$ = new ConstExpr(AtomicType::UniformUInt16->GetAsConstType(),
+                           (uint16_t)yylval.intVal, @1);
+    }
     | TOKEN_INT32_CONSTANT {
         $$ = new ConstExpr(AtomicType::UniformInt32->GetAsConstType(),
                            (int32_t)yylval.intVal, @1);
@@ -309,7 +328,11 @@ primary_expression
     }
     | TOKEN_FLOAT_CONSTANT {
         $$ = new ConstExpr(AtomicType::UniformFloat->GetAsConstType(),
-                           (float)yylval.floatVal, @1);
+                           yylval.floatVal, @1);
+    }
+    | TOKEN_DOUBLE_CONSTANT {
+        $$ = new ConstExpr(AtomicType::UniformDouble->GetAsConstType(),
+                           yylval.doubleVal, @1);
     }
     | TOKEN_TRUE {
         $$ = new ConstExpr(AtomicType::UniformBool->GetAsConstType(), true, @1);
@@ -330,17 +353,75 @@ launch_expression
     : TOKEN_LAUNCH postfix_expression '(' argument_expression_list ')'
       {
           ConstExpr *oneExpr = new ConstExpr(AtomicType::UniformInt32, (int32_t)1, @2);
-          $$ = new FunctionCallExpr($2, $4, Union(@2, @5), true, oneExpr);
+          Expr *launchCount[3] = {oneExpr, oneExpr, oneExpr};
+          $$ = new FunctionCallExpr($2, $4, Union(@2, @5), true, launchCount);
       }
     | TOKEN_LAUNCH postfix_expression '(' ')'
       {
           ConstExpr *oneExpr = new ConstExpr(AtomicType::UniformInt32, (int32_t)1, @2);
-          $$ = new FunctionCallExpr($2, new ExprList(Union(@3,@4)), Union(@2, @4), true, oneExpr);
+          Expr *launchCount[3] = {oneExpr, oneExpr, oneExpr};
+          $$ = new FunctionCallExpr($2, new ExprList(Union(@3,@4)), Union(@2, @4), true, launchCount);
        }
-    | TOKEN_LAUNCH '[' expression ']' postfix_expression '(' argument_expression_list ')'
-      { $$ = new FunctionCallExpr($5, $7, Union(@5,@8), true, $3); }
-    | TOKEN_LAUNCH '[' expression ']' postfix_expression '(' ')'
-      { $$ = new FunctionCallExpr($5, new ExprList(Union(@5,@6)), Union(@5,@7), true, $3); }
+
+    | TOKEN_LAUNCH '[' assignment_expression ']' postfix_expression '(' argument_expression_list ')'
+      { 
+          ConstExpr *oneExpr = new ConstExpr(AtomicType::UniformInt32, (int32_t)1, @5);
+          Expr *launchCount[3] = {$3, oneExpr, oneExpr};
+          $$ = new FunctionCallExpr($5, $7, Union(@5,@8), true, launchCount);
+      }
+    | TOKEN_LAUNCH '[' assignment_expression ']' postfix_expression '(' ')'
+      { 
+          ConstExpr *oneExpr = new ConstExpr(AtomicType::UniformInt32, (int32_t)1, @5);
+          Expr *launchCount[3] = {$3, oneExpr, oneExpr};
+          $$ = new FunctionCallExpr($5, new ExprList(Union(@5,@6)), Union(@5,@7), true, launchCount);
+      }
+
+    | TOKEN_LAUNCH '[' assignment_expression ',' assignment_expression ']' postfix_expression '(' argument_expression_list ')'
+      { 
+          ConstExpr *oneExpr = new ConstExpr(AtomicType::UniformInt32, (int32_t)1, @7);
+          Expr *launchCount[3] = {$3, $5, oneExpr};
+          $$ = new FunctionCallExpr($7, $9, Union(@7,@10), true, launchCount);
+      }
+    | TOKEN_LAUNCH '[' assignment_expression ',' assignment_expression ']' postfix_expression '(' ')'
+      { 
+          ConstExpr *oneExpr = new ConstExpr(AtomicType::UniformInt32, (int32_t)1, @7);
+          Expr *launchCount[3] = {$3, $5, oneExpr};
+          $$ = new FunctionCallExpr($7, new ExprList(Union(@7,@8)), Union(@7,@9), true, launchCount);
+      }
+    | TOKEN_LAUNCH '[' assignment_expression ']' '[' assignment_expression ']' postfix_expression '(' argument_expression_list ')'
+      { 
+          ConstExpr *oneExpr = new ConstExpr(AtomicType::UniformInt32, (int32_t)1, @8);
+          Expr *launchCount[3] = {$6, $3, oneExpr};
+          $$ = new FunctionCallExpr($8, $10, Union(@8,@11), true, launchCount);
+      }
+    | TOKEN_LAUNCH '[' assignment_expression ']' '[' assignment_expression ']' postfix_expression '(' ')'
+      { 
+          ConstExpr *oneExpr = new ConstExpr(AtomicType::UniformInt32, (int32_t)1, @8);
+          Expr *launchCount[3] = {$6, $3, oneExpr};
+          $$ = new FunctionCallExpr($8, new ExprList(Union(@8,@9)), Union(@8,@10), true, launchCount);
+      }
+
+    | TOKEN_LAUNCH '[' assignment_expression ',' assignment_expression ',' assignment_expression ']' postfix_expression '(' argument_expression_list ')'
+      { 
+          Expr *launchCount[3] = {$3, $5, $7};
+          $$ = new FunctionCallExpr($9, $11, Union(@9,@12), true, launchCount);
+      }
+    | TOKEN_LAUNCH '[' assignment_expression ',' assignment_expression ',' assignment_expression ']' postfix_expression '(' ')'
+      { 
+          Expr *launchCount[3] = {$3, $5, $7};
+          $$ = new FunctionCallExpr($9, new ExprList(Union(@9,@10)), Union(@9,@11), true, launchCount);
+      }
+    | TOKEN_LAUNCH '[' assignment_expression ']' '[' assignment_expression ']' '[' assignment_expression ']' postfix_expression '(' argument_expression_list ')'
+      { 
+          Expr *launchCount[3] = {$9, $6, $3};
+          $$ = new FunctionCallExpr($11, $13, Union(@11,@14), true, launchCount);
+      }
+    | TOKEN_LAUNCH '[' assignment_expression ']' '[' assignment_expression ']' '[' assignment_expression ']' postfix_expression '(' ')'
+      { 
+          Expr *launchCount[3] = {$9, $6, $3};
+          $$ = new FunctionCallExpr($11, new ExprList(Union(@11,@12)), Union(@11,@13), true, launchCount);
+      }
+
 
     | TOKEN_LAUNCH '<' postfix_expression '(' argument_expression_list ')' '>'
        {
@@ -354,13 +435,13 @@ launch_expression
                 "around function call expression.");
           $$ = NULL;
        }
-    | TOKEN_LAUNCH '[' expression ']' '<' postfix_expression '(' argument_expression_list ')' '>'
+    | TOKEN_LAUNCH '[' assignment_expression ']' '<' postfix_expression '(' argument_expression_list ')' '>'
        {
           Error(Union(@5, @10), "\"launch\" expressions no longer take '<' '>' "
                 "around function call expression.");
           $$ = NULL;
        }
-    | TOKEN_LAUNCH '[' expression ']' '<' postfix_expression '(' ')' '>'
+    | TOKEN_LAUNCH '[' assignment_expression ']' '<' postfix_expression '(' ')' '>'
        {
           Error(Union(@5, @9), "\"launch\" expressions no longer take '<' '>' "
                 "around function call expression.");
@@ -445,27 +526,27 @@ cast_expression
 multiplicative_expression
     : cast_expression
     | multiplicative_expression '*' cast_expression
-      { $$ = new BinaryExpr(BinaryExpr::Mul, $1, $3, Union(@1, @3)); }
+      { $$ = MakeBinaryExpr(BinaryExpr::Mul, $1, $3, Union(@1, @3)); }
     | multiplicative_expression '/' cast_expression
-      { $$ = new BinaryExpr(BinaryExpr::Div, $1, $3, Union(@1, @3)); }
+      { $$ = MakeBinaryExpr(BinaryExpr::Div, $1, $3, Union(@1, @3)); }
     | multiplicative_expression '%' cast_expression
-      { $$ = new BinaryExpr(BinaryExpr::Mod, $1, $3, Union(@1, @3)); }
+      { $$ = MakeBinaryExpr(BinaryExpr::Mod, $1, $3, Union(@1, @3)); }
     ;
 
 additive_expression
     : multiplicative_expression
     | additive_expression '+' multiplicative_expression
-      { $$ = new BinaryExpr(BinaryExpr::Add, $1, $3, Union(@1, @3)); }
+      { $$ = MakeBinaryExpr(BinaryExpr::Add, $1, $3, Union(@1, @3)); }
     | additive_expression '-' multiplicative_expression
-      { $$ = new BinaryExpr(BinaryExpr::Sub, $1, $3, Union(@1, @3)); }
+      { $$ = MakeBinaryExpr(BinaryExpr::Sub, $1, $3, Union(@1, @3)); }
     ;
 
 shift_expression
     : additive_expression
     | shift_expression TOKEN_LEFT_OP additive_expression
-      { $$ = new BinaryExpr(BinaryExpr::Shl, $1, $3, Union(@1,@3)); }
+      { $$ = MakeBinaryExpr(BinaryExpr::Shl, $1, $3, Union(@1, @3)); }
     | shift_expression TOKEN_RIGHT_OP additive_expression
-      { $$ = new BinaryExpr(BinaryExpr::Shr, $1, $3, Union(@1,@3)); }
+      { $$ = MakeBinaryExpr(BinaryExpr::Shr, $1, $3, Union(@1, @3)); }
     ;
 
 relational_expression
@@ -536,7 +617,7 @@ rate_qualified_type_specifier
     {
         if ($2 == NULL)
             $$ = NULL;
-        else if (Type::Equal($2, AtomicType::Void)) {
+        else if ($2->IsVoidType()) {
             Error(@1, "\"uniform\" qualifier is illegal with \"void\" type.");
             $$ = NULL;
         }
@@ -547,7 +628,7 @@ rate_qualified_type_specifier
     {
         if ($2 == NULL)
             $$ = NULL;
-        else if (Type::Equal($2, AtomicType::Void)) {
+        else if ($2->IsVoidType()) {
             Error(@1, "\"varying\" qualifier is illegal with \"void\" type.");
             $$ = NULL;
         }
@@ -1000,7 +1081,7 @@ specifier_qualifier_list
     {
         if ($2 != NULL) {
             if ($1 == TYPEQUAL_UNIFORM) {
-                if (Type::Equal($2, AtomicType::Void)) {
+                if ($2->IsVoidType()) {
                     Error(@1, "\"uniform\" qualifier is illegal with \"void\" type.");
                     $$ = NULL;
                 }
@@ -1008,7 +1089,7 @@ specifier_qualifier_list
                     $$ = $2->GetAsUniformType();
             }
             else if ($1 == TYPEQUAL_VARYING) {
-                if (Type::Equal($2, AtomicType::Void)) {
+                if ($2->IsVoidType()) {
                     Error(@1, "\"varying\" qualifier is illegal with \"void\" type.");
                     $$ = NULL;
                 }
@@ -1233,7 +1314,10 @@ declarator
     ;
 
 int_constant
-    : TOKEN_INT32_CONSTANT { $$ = yylval.intVal; }
+    : TOKEN_INT8_CONSTANT { $$ = yylval.intVal; }
+    | TOKEN_INT16_CONSTANT { $$ = yylval.intVal; }
+    | TOKEN_INT32_CONSTANT { $$ = yylval.intVal; }
+    | TOKEN_INT64_CONSTANT { $$ = yylval.intVal; }
     ;
 
 direct_declarator
@@ -2148,8 +2232,27 @@ lAddFunctionParams(Declarator *decl) {
 
 /** Add a symbol for the built-in mask variable to the symbol table */
 static void lAddMaskToSymbolTable(SourcePos pos) {
-    const Type *t = g->target->getMaskBitCount() == 1 ?
-        AtomicType::VaryingBool : AtomicType::VaryingUInt32;
+    const Type *t = NULL;
+    switch (g->target->getMaskBitCount()) {
+    case 1:
+        t = AtomicType::VaryingBool;
+        break;
+    case 8:
+        t = AtomicType::VaryingUInt8;
+        break;
+    case 16:
+        t = AtomicType::VaryingUInt16;
+        break;
+    case 32:
+        t = AtomicType::VaryingUInt32;
+        break;
+    case 64:
+        t = AtomicType::VaryingUInt64;
+        break;
+    default:
+        FATAL("Unhandled mask bitsize in lAddMaskToSymbolTable");
+    }
+
     t = t->GetAsConstType();
     Symbol *maskSymbol = new Symbol("__mask", pos, t);
     m->symbolTable->AddVariable(maskSymbol);
@@ -2169,9 +2272,24 @@ static void lAddThreadIndexCountToSymbolTable(SourcePos pos) {
 
     Symbol *taskIndexSym = new Symbol("taskIndex", pos, type);
     m->symbolTable->AddVariable(taskIndexSym);
-
+    
     Symbol *taskCountSym = new Symbol("taskCount", pos, type);
     m->symbolTable->AddVariable(taskCountSym);
+    
+    Symbol *taskIndexSym0 = new Symbol("taskIndex0", pos, type);
+    m->symbolTable->AddVariable(taskIndexSym0);
+    Symbol *taskIndexSym1 = new Symbol("taskIndex1", pos, type);
+    m->symbolTable->AddVariable(taskIndexSym1);
+    Symbol *taskIndexSym2 = new Symbol("taskIndex2", pos, type);
+    m->symbolTable->AddVariable(taskIndexSym2);
+
+    
+    Symbol *taskCountSym0 = new Symbol("taskCount0", pos, type);
+    m->symbolTable->AddVariable(taskCountSym0);
+    Symbol *taskCountSym1 = new Symbol("taskCount1", pos, type);
+    m->symbolTable->AddVariable(taskCountSym1);
+    Symbol *taskCountSym2 = new Symbol("taskCount2", pos, type);
+    m->symbolTable->AddVariable(taskCountSym2);
 }
 
 
@@ -2241,7 +2359,11 @@ lGetConstantInt(Expr *expr, int *value, SourcePos pos, const char *usage) {
             Error(pos, "%s must be representable with a 32-bit integer.", usage);
             return false;
         }
-        *value = (int)ci->getZExtValue();
+        const Type *type = expr->GetType();
+        if (type->IsUnsignedType())
+            *value = (int)ci->getZExtValue();
+        else
+            *value = (int)ci->getSExtValue();
         return true;
     }
 }
@@ -2287,7 +2409,7 @@ lFinalizeEnumeratorSymbols(std::vector<Symbol *> &enums,
         enums[i]->type = enumType;
         if (enums[i]->constValue != NULL) {
             /* Already has a value, so first update nextVal with it. */
-            int count = enums[i]->constValue->AsUInt32(&nextVal);
+            int count = enums[i]->constValue->GetValues(&nextVal);
             AssertPos(enums[i]->pos, count == 1);
             ++nextVal;
 

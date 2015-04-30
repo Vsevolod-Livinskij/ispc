@@ -1,3 +1,239 @@
+=== v1.8.1 === (31 December 2014)
+
+A minor update of ``ispc`` with several important stability fixes, namely:
+
+* Auto-dispatch mechanism is fixed in pre-built Linux binaries (it used to
+  select too conservative target).
+
+* Compile crash with "-O2 -g" is fixed.
+
+Also KNC (Xeon Phi) support is further improved.
+
+The release includes experimental build for Sony PlayStation4 target (Windows
+cross compiler), as well NVPTX experimental support (64 bit Linux binaries
+only). Note that there might be NVPTX compilation fails with CUDA 7.0.
+
+Similar to 1.8.0 all binaries are based on LLVM 3.5. MacOS binaries are built
+for MacOS 10.9 Mavericks. Linux binaries are compatible with kernel 2.6.32
+(ok for RHEL6) and later.
+
+=== v1.8.0 === (16 October 2014)
+
+A major new version of ISPC, which introduces experimental support for NVPTX
+target, brings numerous improvements to our KNC (Xeon Phi) support, introduces
+debugging support on Windows and fixes several bugs. We also ship experimental
+build for Sony PlayStation4 target in this release. Binaries for all platforms
+are based on LLVM 3.5.
+
+Note that MacOS binaries are build for MacOS 10.9 Mavericks. Linux binaries are
+compatible with kernel 2.6.32 (ok for RHEL6) and later.
+
+More details:
+
+* Experimental NVPTX support is available for users of our binary distribution
+  on Linux only at the moment. MacOS and Windows users willing to experiment
+  with this target are welcome to build it from source. Note that GPU imposes
+  some limitation on ISPC language, which are discussed in corresponding section
+  of ISPC User's Guide. Implementation of NVPTX support was done by our
+  contributor Evghenii Gaburov.
+
+* KNC support was greatly extended in knc.h header file. Beyond new features
+  there are stability fixes and changes for icc 15.0 compatibility. Stdlib
+  prefetch functions were improved to map to KNC vector prefetches.
+
+* PS4 experimental build is Windows to PS4 cross compiler, which disables arch
+  and cpu selection (which are preset to PS4 hardware).
+
+* Debug info support on Windows (compatible with VS2010, VS2012 and VS2013).
+
+* Critical bug fix, which caused code generation for incorrect target, despite
+  explicit target switches, under some conditions.
+
+* Stability fix of the bug, which caused print() function to execute under
+  all-off mask under some conditions.
+
+=== v1.7.0 === (18 April 2014)
+
+A major new version of ISPC with several language and library extensions and
+fixes in debug info support. Binaries for all platforms are based on patched
+version on LLVM 3.4. There also performance improvements beyond switchover to
+LLVM 3.4.
+
+The list of language and library changes:
+
+* Support for varying types in exported functions was added. See documentation
+  for more details.
+
+* get_programCount() function was moved from stdlib.ispc to
+  examples/util/util.isph, which needs to be included somewhere in your
+  project, if you want to use it.
+
+* Library functions for saturated arithmetic were added. add/sub/mul/div
+  operations are supported for signed and unsigned 8/16/32/64 integer types
+  (both uniform and varying).
+
+* The algorithm for selecting overloaded function was extended to cover more
+  types of overloading. Handling of reference types in overloaded functions was
+  fixed. The rules for selecting the best match were changed to match C++,
+  which requires the function to be the best match for all parameters. In
+  ambiguous cases, a warning is issued, but it will be converted to an error
+  in the next release.
+
+* Explicit typecasts between any two reference types were allowed.
+
+* Implicit cast of pointer to const type to void* was disallowed.
+
+The list of other notable changes is:
+
+* Number of fixes for better debug info support.
+
+* Memory corruption bug was fixed, which caused rare but not reproducible
+  compile time fails.
+
+* Alias analysis was enabled (more aggressive optimizations are expected).
+
+* A bug involving inaccurate handling of "const" qualifier was fixed. As a
+  result, more "const" qualifiers may appear in .h files, which may cause
+  compilation errors.
+
+=== v1.6.0 === (19 December 2013)
+
+A major new version of ISPC with major improvements in performance and
+stability. Linux and MacOS binaries are based on patched version of LLVM 3.3,
+while Windows version is based on LLVM 3.4rc3. LLVM 3.4 significantly improves
+stability on Win32 platform, so we've decided not to wait for official LLVM 3.4
+release.
+
+The list of the most significant changes is:
+
+* New avx1-i32x4 target was added. It may play well for you, if you are focused
+  on integer computations or FP unit in your hardware is 128 bit wide.
+
+* Support for calculations in double precision was extended with two new
+  targets avx1.1-i64x4 and avx2-i64x4.
+
+* Language support for overloaded operators was added.
+
+* New library shift() function was added, which is similar to rotate(), but is
+  non-circular.
+
+* The language was extended to accept 3 dimensional tasking - a syntactic sugar,
+  which may facilitate programming of some tasks.
+
+* Regression, which broke --opt=force-aligned-memory is fixed.
+
+If you are not using pre-built binaries, you may notice the following changes:
+
+* VS2012/VS2013 are supported.
+
+* alloy.py (with -b switch) can build LLVM for you on any platform now
+  (except MacOS 10.9, but we know about the problem and working on it).
+  This is a preferred way to build LLVM for ISPC, as all required patches for
+  better performance and stability will automatically apply.
+
+* LLVM 3.5 (current trunk) is supported.
+
+There are also multiple fixes for better performance and stability, most
+notable are:
+
+* Fixed performance problem for x2 targets.
+
+* Fixed a problem with incorrect vzeroupper insertion on AVX target on Win32.
+
+=== v1.5.0 === (27 September 2013)
+
+A major new version of ISPC with several new targets and important bug fixes.
+Here's a list of the most important changes, if you are using pre-built
+binaries (which are based on patched version of LLVM 3.3):
+
+* The naming of targets was changed to explicitly include data type width and
+  a number of threads in the gang. For example, avx2-i32x8 is avx2 target,
+  which uses 32 bit types as a base and has 8 threads in a gang. Old naming
+  scheme is still supported, but depricated.
+
+* New SSE4 targets for calculations based on 8 bit and 16 bit data types:
+  sse4-i8x16 and sse4-i16x8.
+
+* New AVX1 target for calculations based on 64 bit data types: avx1-i64x4.
+
+* SVML support was extended and improved.
+
+* Behavior of -g switch was changed to not affect optimization level.
+
+* ISPC debug infrastructure was redesigned. See --help-dev for more info and
+  enjoy capabilities of new --debug-phase=<value> and --off-phase=<value>
+  switches.
+
+* Fixed an auto-dispatch bug, which caused AVX code execution when OS doesn't
+  support AVX (but hardware does).
+
+* Fixed a bug, which discarded uniform/varying keyword in typedefs.
+
+* Several performance regressions were fixed.
+
+If you are building ISPC yourself, then following changes are also available
+to you:
+
+* --cpu=slm for targeting Intel Atom codename Silvermont (if LLVM 3.4 is used).
+
+* ARM NEON targets are available (if enabled in build system).
+
+* --debug-ir=<value> is available to generate debug information based on LLVM
+  IR (if LLVM 3.4 is used). In debugger you'll see LLVM IR instead of source
+  code.
+
+* A redesigned and improved test and configuration management system is
+  available to facilitate the process of building LLVM and testing ISPC
+  compiler.
+
+Standard library changes/fixes:
+
+* __pause() function was removed from standard library.
+
+* Fixed reduce_[min|max]_[float|double] intrinsics, which were producing
+  incorrect code under some conditions.
+
+Language changes:
+
+* By default a floating point constant without a suffix is a single precision
+  constant (32 bit). A new suffix "d" was introduced to allow double precision
+  constant (64 bit). Please refer to tests/double-consts.ispc for syntax
+  examples.
+
+=== v1.4.4 === (19 July 2013)
+
+A minor version update with several stability fixes requested by the customers.
+
+=== v1.4.3 === (25 June 2013)
+
+A minor version update with several stability improvements:
+
+* Two bugs were fixed (including a bug in LLVM) to improve stability on 32 bit
+  platforms.
+
+* A bug affecting several examples was fixed.
+
+* --instrument switch is fixed.
+
+All tests and examples now properly compile and execute on native targets on
+Unix platforms (Linux and MacOS).
+
+=== v1.4.2 === (11 June 2013)
+
+A minor version update with a few important changes:
+
+* Stability fix for AVX2 target (Haswell) - problem with gather instructions was
+  released in LLVM 3.4, if you build with LLVM 3.2 or 3.3, it's available in our
+  repository (llvm_patches/r183327-AVX2-GATHER.patch) and needs to be applied
+  manually.
+
+* Stability fix for widespread issue on Win32 platform (#503).
+
+* Performance improvements for Xeon Phi related to mask representation.
+
+Also LLVM 3.3 has been released and now it's the recommended version for building ISPC.
+Precompiled binaries are also built with LLVM 3.3. 
+
 === v1.4.1 === (28 May 2013)
 
 A major new version of ispc has been released with stability and performance
@@ -20,7 +256,7 @@ Important bug fixes/changes:
 
 * FMA instructions are enabled for AVX2 instruction set.
 
-* Support of RDRAND instruction when availible via library function rdrand (Ivy Bridge).
+* Support of RDRAND instruction when available via library function rdrand (Ivy Bridge).
 
 Release also contains numerous bug fixes and minor improvements.
 

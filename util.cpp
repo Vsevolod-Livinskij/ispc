@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2010-2013, Intel Corporation
+  Copyright (c) 2010-2014, Intel Corporation
   All rights reserved.
 
   Redistribution and use in source and binary forms, with or without
@@ -65,9 +65,7 @@
 #include <set>
 #include <algorithm>
 
-#if defined(LLVM_3_1)
-  #include <llvm/Target/TargetData.h>
-#elif defined(LLVM_3_2)
+#if defined(LLVM_3_2)
   #include <llvm/DataLayout.h>
 #else // LLVM 3.3+
   #include <llvm/IR/DataLayout.h>
@@ -79,8 +77,8 @@
     compiler under a debuffer; in this case, just return a reasonable
     default.
  */
-static int
-lTerminalWidth() {
+int
+TerminalWidth() {
     if (g->disableLineWrap)
         return 1<<30;
 
@@ -228,8 +226,8 @@ lFindIndent(int numColons, const char *buf) {
 /** Print the given string to the given FILE, assuming the given output
     column width.  Break words as needed to avoid words spilling past the
     last column.  */
-static void
-lPrintWithWordBreaks(const char *buf, int indent, int columnWidth, FILE *out) {
+void
+PrintWithWordBreaks(const char *buf, int indent, int columnWidth, FILE *out) {
 #ifdef ISPC_IS_WINDOWS
     fputs(buf, out);
     fputs("\n", out);
@@ -375,7 +373,7 @@ lPrint(const char *type, bool isError, SourcePos p, const char *fmt,
         return;
     printed.insert(formattedBuf);
 
-    lPrintWithWordBreaks(formattedBuf, indent, lTerminalWidth(), stderr);
+    PrintWithWordBreaks(formattedBuf, indent, TerminalWidth(), stderr);
     lPrintFileLineContext(p);
 
     free(errorBuf);
@@ -577,7 +575,7 @@ GetDirectoryAndFileName(const std::string &currentDirectory,
     const char *basenameStart = strrchr(fp, '/');
     Assert(basenameStart != NULL);
     ++basenameStart;
-    Assert(basenameStart != '\0');
+    Assert(basenameStart[0] != '\0');
     *filename = basenameStart;
     *directory = std::string(fp, basenameStart - fp);
 #endif // ISPC_IS_WINDOWS
@@ -616,13 +614,9 @@ VerifyDataLayoutCompatibility(const std::string &module_dl,
     // which contradic: f80:128:128 followed by f80:32:32. This is a bug, but
     // correct thing to do is to interpret this exactly how LLVM would treat it,
     // so we create a DataLayout class and take its string representation.
-#if defined(LLVM_3_1)
-    llvm::TargetData d1(module_dl);
-    llvm::TargetData d2(lib_dl);
-#else // LLVM 3.2+
+
     llvm::DataLayout d1(module_dl);
     llvm::DataLayout d2(lib_dl);
-#endif
 
     std::string module_dl_canonic = d1.getStringRepresentation();
     std::string lib_dl_canonic = d2.getStringRepresentation();

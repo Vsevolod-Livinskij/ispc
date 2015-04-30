@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2010-2011, Intel Corporation
+  Copyright (c) 2010-2013, Intel Corporation
   All rights reserved.
 
   Redistribution and use in source and binary forms, with or without
@@ -155,5 +155,19 @@ void GetDirectoryAndFileName(const std::string &currentDir,
  */
 bool VerifyDataLayoutCompatibility(const std::string &module_dl,
                                    const std::string &lib_dl);
+
+/** Print the given string to the given FILE, assuming the given output
+    column width.  Break words as needed to avoid words spilling past the
+    last column.  */
+void PrintWithWordBreaks(const char *buf, int indent, int columnWidth,
+                         FILE *out);
+
+/** Returns the width of the terminal where the compiler is running.
+    Finding this out may fail in a variety of reasonable situations (piping
+    compiler output to 'less', redirecting output to a file, running the
+    compiler under a debuffer; in this case, just return a reasonable
+    default.
+ */
+int TerminalWidth();
 
 #endif // ISPC_UTIL_H

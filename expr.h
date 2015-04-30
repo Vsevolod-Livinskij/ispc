@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2010-2012, Intel Corporation
+  Copyright (c) 2010-2013, Intel Corporation
   All rights reserved.
 
   Redistribution and use in source and binary forms, with or without
@@ -155,6 +155,7 @@ public:
 
     llvm::Value *GetValue(FunctionEmitContext *ctx) const;
     const Type *GetType() const;
+    const Type *GetLValueType() const;
     void Print() const;
 
     Expr *Optimize();
@@ -246,7 +247,8 @@ public:
 class FunctionCallExpr : public Expr {
 public:
     FunctionCallExpr(Expr *func, ExprList *args, SourcePos p,
-                     bool isLaunch = false, Expr *launchCountExpr = NULL);
+                     bool isLaunch = false, 
+                     Expr *launchCountExpr[3] = NULL);
 
     llvm::Value *GetValue(FunctionEmitContext *ctx) const;
     llvm::Value *GetLValue(FunctionEmitContext *ctx) const;
@@ -261,7 +263,7 @@ public:
     Expr *func;
     ExprList *args;
     bool isLaunch;
-    Expr *launchCountExpr;
+    Expr *launchCountExpr[3];
 };
 
 
@@ -409,71 +411,22 @@ public:
     Expr *Optimize();
     int EstimateCost() const;
 
-    /** Return the ConstExpr's values as booleans, doing type conversion
-        from the actual type if needed.  If forceVarying is true, then type
-        convert to 'varying' so as to always return a number of values
-        equal to the target vector width into the given pointer. */
-    int AsBool(bool *, bool forceVarying = false) const;
-
-    /** Return the ConstExpr's values as int8s, doing type conversion
-        from the actual type if needed.  If forceVarying is true, then type
-        convert to 'varying' so as to always return a number of values
-        equal to the target vector width into the given pointer. */
-    int AsInt8(int8_t *, bool forceVarying = false) const;
-
-    /** Return the ConstExpr's values as uint8s, doing type conversion
-        from the actual type if needed.  If forceVarying is true, then type
-        convert to 'varying' so as to always return a number of values
-        equal to the target vector width into the given pointer. */
-    int AsUInt8(uint8_t *, bool forceVarying = false) const;
-
-    /** Return the ConstExpr's values as int16s, doing type conversion
-        from the actual type if needed.  If forceVarying is true, then type
-        convert to 'varying' so as to always return a number of values
-        equal to the target vector width into the given pointer. */
-    int AsInt16(int16_t *, bool forceVarying = false) const;
-
-    /** Return the ConstExpr's values as uint16s, doing type conversion
-        from the actual type if needed.  If forceVarying is true, then type
-        convert to 'varying' so as to always return a number of values
-        equal to the target vector width into the given pointer. */
-    int AsUInt16(uint16_t *, bool forceVarying = false) const;
-
-    /** Return the ConstExpr's values as int32s, doing type conversion
-        from the actual type if needed.  If forceVarying is true, then type
-        convert to 'varying' so as to always return a number of values
-        equal to the target vector width into the given pointer. */
-    int AsInt32(int32_t *, bool forceVarying = false) const;
-
-    /** Return the ConstExpr's values as uint32s, doing type conversion
-        from the actual type if needed.  If forceVarying is true, then type
-        convert to 'varying' so as to always return a number of values
-        equal to the target vector width into the given pointer. */
-    int AsUInt32(uint32_t *, bool forceVarying = false) const;
-
-    /** Return the ConstExpr's values as floats, doing type conversion
-        from the actual type if needed.  If forceVarying is true, then type
-        convert to 'varying' so as to always return a number of values
-        equal to the target vector width into the given pointer. */
-    int AsFloat(float *, bool forceVarying = false) const;
-
-    /** Return the ConstExpr's values as int64s, doing type conversion
-        from the actual type if needed.  If forceVarying is true, then type
-        convert to 'varying' so as to always return a number of values
-        equal to the target vector width into the given pointer. */
-    int AsInt64(int64_t *, bool forceVarying = false) const;
-
-    /** Return the ConstExpr's values as uint64s, doing type conversion
-        from the actual type if needed.  If forceVarying is true, then type
-        convert to 'varying' so as to always return a number of values
-        equal to the target vector width into the given pointer. */
-    int AsUInt64(uint64_t *, bool forceVarying = false) const;
-
-    /** Return the ConstExpr's values as doubles, doing type conversion
-        from the actual type if needed.  If forceVarying is true, then type
-        convert to 'varying' so as to always return a number of values
-        equal to the target vector width into the given pointer. */
-    int AsDouble(double *, bool forceVarying = false) const;
+    /** Return the ConstExpr's values as the given pointer type, doing type
+        conversion from the actual type if needed.  If forceVarying is
+        true, then type convert to 'varying' so as to always return a
+        number of values equal to the target vector width into the given
+        pointer. */
+    int GetValues(bool *, bool forceVarying = false) const;
+    int GetValues(int8_t *, bool forceVarying = false) const;
+    int GetValues(uint8_t *, bool forceVarying = false) const;
+    int GetValues(int16_t *, bool forceVarying = false) const;
+    int GetValues(uint16_t *, bool forceVarying = false) const;
+    int GetValues(int32_t *, bool forceVarying = false) const;
+    int GetValues(uint32_t *, bool forceVarying = false) const;
+    int GetValues(float *, bool forceVarying = false) const;
+    int GetValues(int64_t *, bool forceVarying = false) const;
+    int GetValues(uint64_t *, bool forceVarying = false) const;
+    int GetValues(double *, bool forceVarying = false) const;
 
     /** Return the number of values in the ConstExpr; should be either 1,
         if it has uniform type, or the target's vector width if it's
@@ -590,6 +543,7 @@ public:
 
     llvm::Value *GetValue(FunctionEmitContext *ctx) const;
     const Type *GetType() const;
+    const Type *GetLValueType() const;
     Symbol *GetBaseSymbol() const;
     void Print() const;
     Expr *TypeCheck();
@@ -682,7 +636,8 @@ private:
     static int computeOverloadCost(const FunctionType *ftype,
                                    const std::vector<const Type *> &argTypes,
                                    const std::vector<bool> *argCouldBeNULL,
-                            const std::vector<bool> *argIsConstant);
+                                   const std::vector<bool> *argIsConstant,
+                                   int * cost);
 
     /** Name of the function that is being called. */
     std::string name;
@@ -778,6 +733,8 @@ bool CanConvertTypes(const Type *fromType, const Type *toType,
     parameter").
  */
 Expr *TypeConvertExpr(Expr *expr, const Type *toType, const char *errorMsgBase);
+
+Expr * MakeBinaryExpr(BinaryExpr::Op o, Expr *a, Expr *b, SourcePos p);
 
 /** Utility routine that emits code to initialize a symbol given an
     initializer expression.

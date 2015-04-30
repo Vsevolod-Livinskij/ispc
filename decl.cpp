@@ -69,24 +69,32 @@ lApplyTypeQualifiers(int typeQualifiers, const Type *type, SourcePos pos) {
     if (type == NULL)
         return NULL;
 
-    if ((typeQualifiers & TYPEQUAL_CONST) != 0)
+    if ((typeQualifiers & TYPEQUAL_CONST) != 0) {
         type = type->GetAsConstType();
+    }
+
+    if ( ((typeQualifiers & TYPEQUAL_UNIFORM) != 0)
+         && ((typeQualifiers & TYPEQUAL_VARYING) != 0) ) {
+        Error(pos, "Type \"%s\" cannot be qualified with both uniform and varying.", 
+              type->GetString().c_str());
+    }
 
     if ((typeQualifiers & TYPEQUAL_UNIFORM) != 0) {
-        if (Type::Equal(type, AtomicType::Void))
+        if (type->IsVoidType())
             Error(pos, "\"uniform\" qualifier is illegal with \"void\" type.");
         else
             type = type->GetAsUniformType();
     }
     else if ((typeQualifiers & TYPEQUAL_VARYING) != 0) {
-        if (Type::Equal(type, AtomicType::Void))
+        if (type->IsVoidType())
             Error(pos, "\"varying\" qualifier is illegal with \"void\" type.");
         else
             type = type->GetAsVaryingType();
     }
-    else
-        if (Type::Equal(type, AtomicType::Void) == false)
+    else {
+        if (type->IsVoidType() == false)
             type = type->GetAsUnboundVariabilityType();
+    }
 
     if ((typeQualifiers & TYPEQUAL_UNSIGNED) != 0) {
         if ((typeQualifiers & TYPEQUAL_SIGNED) != 0)
@@ -124,6 +132,17 @@ DeclSpecs::DeclSpecs(const Type *t, StorageClass sc, int tq) {
     typeQualifiers = tq;
     soaWidth = 0;
     vectorSize = 0;
+    if (t != NULL) {
+        if (m->symbolTable->ContainsType(t)) {
+            // Typedefs might have uniform/varying qualifiers inside.
+            if (t->IsVaryingType()) {
+                typeQualifiers |= TYPEQUAL_VARYING;
+            }
+            else if (t->IsUniformType()) {
+                typeQualifiers |= TYPEQUAL_UNIFORM;
+            }
+        }
+    }
 }
 
 
@@ -149,6 +168,15 @@ DeclSpecs::GetBaseType(SourcePos pos) const {
     retType = lApplyTypeQualifiers(typeQualifiers, retType, pos);
 
     if (soaWidth > 0) {
+#ifdef ISPC_NVPTX_ENABLED
+#if 0  /* see stmt.cpp in DeclStmt::EmitCode for work-around of SOAType Declaration */
+        if (g->target->getISA() == Target::NVPTX)
+        {
+            Error(pos, "\"soa\" data types are currently not supported with \"nvptx\" target.");
+            return NULL;
+        }
+#endif
+#endif /* ISPC_NVPTX_ENABLED */
         const StructType *st = CastType<StructType>(retType);
 
         if (st == NULL) {
@@ -229,6 +257,7 @@ Declarator::Declarator(DeclaratorKind dk, SourcePos p)
 void
 Declarator::InitFromDeclSpecs(DeclSpecs *ds) {
     const Type *baseType = ds->GetBaseType(pos);
+
     InitFromType(baseType, ds);
 
     if (type == NULL) {
@@ -372,7 +401,7 @@ Declarator::InitFromType(const Type *baseType, DeclSpecs *ds) {
             type = refType;
     }
     else if (kind == DK_ARRAY) {
-        if (Type::Equal(baseType, AtomicType::Void)) {
+        if (baseType->IsVoidType()) {
             Error(pos, "Arrays of \"void\" type are illegal.");
             return;
         }
@@ -382,6 +411,15 @@ Declarator::InitFromType(const Type *baseType, DeclSpecs *ds) {
             return;
         }
 
+#ifdef ISPC_NVPTX_ENABLED
+#if 0 /* NVPTX */
+        if (baseType->IsUniformType())
+        {
+          fprintf(stderr, " detected uniform array of size= %d  array= %s\n" ,arraySize,
+              baseType->IsArrayType() ? " true " : " false ");
+        }
+#endif
+#endif /* ISPC_NVPTX_ENABLED */
         const Type *arrayType = new ArrayType(baseType, arraySize);
         if (child != NULL) {
             child->InitFromType(arrayType, ds);
@@ -434,7 +472,7 @@ Declarator::InitFromType(const Type *baseType, DeclSpecs *ds) {
                       "function parameter declaration for parameter \"%s\".",
                       lGetStorageClassName(d->declSpecs->storageClass),
                       decl->name.c_str());
-            if (Type::Equal(decl->type, AtomicType::Void)) {
+            if (decl->type->IsVoidType()) {
                 Error(decl->pos, "Parameter with type \"void\" illegal in function "
                       "parameter list.");
                 decl->type = NULL;
@@ -591,6 +629,7 @@ Declaration::Declaration(DeclSpecs *ds, Declarator *d) {
 }
 
 
+
 std::vector<VariableDeclaration>
 Declaration::GetVariableDeclarations() const {
     Assert(declSpecs->storageClass != SC_TYPEDEF);
@@ -604,7 +643,7 @@ Declaration::GetVariableDeclarations() const {
             continue;
         }
 
-        if (Type::Equal(decl->type, AtomicType::Void))
+        if (decl->type->IsVoidType())
             Error(decl->pos, "\"void\" type variable illegal in declaration.");
         else if (CastType<FunctionType>(decl->type) == NULL) {
             decl->type = decl->type->ResolveUnboundVariability(Variability::Varying);
@@ -668,7 +707,7 @@ GetStructTypesNamesPositions(const std::vector<StructDeclaration *> &sd,
         // FIXME: making this fake little DeclSpecs here is really
         // disgusting
         DeclSpecs ds(type);
-        if (Type::Equal(type, AtomicType::Void) == false) {
+        if (type->IsVoidType() == false) {
             if (type->IsUniformType())
                 ds.typeQualifiers |= TYPEQUAL_UNIFORM;
             else if (type->IsVaryingType())
@@ -682,7 +721,7 @@ GetStructTypesNamesPositions(const std::vector<StructDeclaration *> &sd,
             Declarator *d = (*sd[i]->declarators)[j];
             d->InitFromDeclSpecs(&ds);
 
-            if (Type::Equal(d->type, AtomicType::Void))
+            if (d->type->IsVoidType())
                 Error(d->pos, "\"void\" type illegal for struct member.");
 
             elementTypes->push_back(d->type);

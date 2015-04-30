@@ -42,6 +42,8 @@
 #include <algorithm>
 #include "../timing.h"
 #include "mandelbrot_ispc.h"
+#include <string.h>
+#include <cstdlib>
 using namespace ispc;
 
 extern void mandelbrot_serial(float x0, float y0, float x1, float y1,
@@ -67,13 +69,27 @@ writePPM(int *buf, int width, int height, const char *fn) {
 }
 
 
-int main() {
+int main(int argc, char *argv[]) {
+    static unsigned int test_iterations[] = {3, 3};
     unsigned int width = 768;
     unsigned int height = 512;
     float x0 = -2;
     float x1 = 1;
     float y0 = -1;
     float y1 = 1;
+
+    if (argc > 1) {
+        if (strncmp(argv[1], "--scale=", 8) == 0) {
+            float scale = atof(argv[1] + 8);
+            width *= scale;
+            height *= scale;
+        }
+    }
+    if ((argc == 3) || (argc == 4)) {
+        for (int i = 0; i < 2; i++) {
+            test_iterations[i] = atoi(argv[argc - 2 + i]);
+        }
+    }
 
     int maxIterations = 256;
     int *buf = new int[width*height];
@@ -83,10 +99,11 @@ int main() {
     // time of three runs.
     //
     double minISPC = 1e30;
-    for (int i = 0; i < 3; ++i) {
+    for (unsigned int i = 0; i < test_iterations[0]; ++i) {
         reset_and_start_timer();
         mandelbrot_ispc(x0, y0, x1, y1, width, height, maxIterations, buf);
         double dt = get_elapsed_mcycles();
+        printf("@time of ISPC run:\t\t\t[%.3f] million cycles\n", dt);
         minISPC = std::min(minISPC, dt);
     }
 
@@ -102,14 +119,15 @@ int main() {
     // minimum time.
     //
     double minSerial = 1e30;
-    for (int i = 0; i < 3; ++i) {
+    for (unsigned int i = 0; i < test_iterations[1]; ++i) {
         reset_and_start_timer();
         mandelbrot_serial(x0, y0, x1, y1, width, height, maxIterations, buf);
         double dt = get_elapsed_mcycles();
+        printf("@time of serial run:\t\t\t[%.3f] million cycles\n", dt);
         minSerial = std::min(minSerial, dt);
     }
 
-    printf("[mandelbrot serial]:\t\t[%.3f] millon cycles\n", minSerial);
+    printf("[mandelbrot serial]:\t\t[%.3f] million cycles\n", minSerial);
     writePPM(buf, width, height, "mandelbrot-serial.ppm");
 
     printf("\t\t\t\t(%.2fx speedup from ISPC)\n", minSerial/minISPC);

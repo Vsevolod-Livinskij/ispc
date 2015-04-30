@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2010-2013, Intel Corporation
+  Copyright (c) 2010-2015, Intel Corporation
   All rights reserved.
 
   Redistribution and use in source and binary forms, with or without
@@ -62,14 +62,18 @@ static void
 lPrintVersion() {
     printf("Intel(r) SPMD Program Compiler (ispc), %s (build %s @ %s, LLVM %s)\n",
            ISPC_VERSION, BUILD_VERSION, BUILD_DATE,
-#if defined(LLVM_3_1)
-           "3.1"
-#elif defined(LLVM_3_2)
+#if defined(LLVM_3_2)
            "3.2"
 #elif defined(LLVM_3_3)
            "3.3"
 #elif defined(LLVM_3_4)
            "3.4"
+#elif defined(LLVM_3_5)
+           "3.5"
+#elif defined(LLVM_3_6)
+           "3.6"
+#elif defined(LLVM_3_7)
+           "3.7"
 #else
 #error "Unhandled LLVM version"
 #endif
@@ -85,13 +89,16 @@ usage(int ret) {
     printf("                          \t\taddressing calculations are done by default, even\n");
     printf("                          \t\ton 64-bit target architectures.)\n");
     printf("    [--arch={%s}]\t\tSelect target architecture\n",
-           Target::SupportedTargetArchs());
+           Target::SupportedArchs());
     printf("    [--c++-include-file=<name>]\t\tSpecify name of file to emit in #include statement in generated C++ code.\n");
 #ifndef ISPC_IS_WINDOWS
     printf("    [--colored-output]\t\tAlways use terminal colors in error/warning messages.\n");
 #endif
-    printf("    [--cpu=<cpu>]\t\t\tSelect target CPU type\n");
-    printf("         <cpu>={%s}\n", Target::SupportedTargetCPUs().c_str());
+    printf("    ");
+    char cpuHelp[2048];
+    sprintf(cpuHelp, "[--cpu=<cpu>]\t\t\tSelect target CPU type\n<cpu>={%s}\n",
+            Target::SupportedCPUs().c_str());
+    PrintWithWordBreaks(cpuHelp, 16, TerminalWidth(), stdout);
     printf("    [-D<foo>]\t\t\t\t#define given value when running preprocessor\n");
     printf("    [--dev-stub <filename>]\t\tEmit device-side offload stub functions to file\n");
     printf("    [--emit-asm]\t\t\tGenerate assembly language file as output\n");
@@ -115,7 +122,7 @@ usage(int ret) {
     printf("    [--nostdlib]\t\t\tDon't make the ispc standard library available\n");
     printf("    [--nocpp]\t\t\t\tDon't run the C preprocessor\n");
     printf("    [-o <name>/--outfile=<name>]\tOutput filename (may be \"-\" for standard output)\n");
-    printf("    [-O0/-O1]\t\t\t\tSet optimization level (-O1 is default)\n");
+    printf("    [-O0/-O(1/2/3)]\t\t\t\tSet optimization level (off or on). Optimizations are on by default.\n");
     printf("    [--opt=<option>]\t\t\tSet optimization option\n");
     printf("        disable-assertions\t\tRemove assertion statements from final code.\n");
     printf("        disable-fma\t\t\tDisable 'fused multiply-add' instructions (on targets that support them)\n");
@@ -127,7 +134,11 @@ usage(int ret) {
     printf("    [--pic]\t\t\t\tGenerate position-independent code\n");
 #endif // !ISPC_IS_WINDOWS
     printf("    [--quiet]\t\t\t\tSuppress all output\n");
-    printf("    [--target=<isa>]\t\t\tSelect target ISA. <isa>={%s}\n", Target::SupportedTargetISAs());
+    printf("    ");
+    char targetHelp[2048];
+    sprintf(targetHelp, "[--target=<t>]\t\t\tSelect target ISA and width.\n"
+            "<t>={%s}", Target::SupportedTargets());
+    PrintWithWordBreaks(targetHelp, 24, TerminalWidth(), stdout);
     printf("    [--version]\t\t\t\tPrint ispc version\n");
     printf("    [--werror]\t\t\t\tTreat warnings as errors\n");
     printf("    [--woff]\t\t\t\tDisable warnings\n");
@@ -142,6 +153,7 @@ devUsage(int ret) {
     lPrintVersion();
     printf("\nusage (developer options): ispc\n");
     printf("    [--debug]\t\t\t\tPrint information useful for debugging ispc\n");
+    printf("    [--dllexport]\t\t\tMake non-static functions DLL exported.  Windows only.\n");  
     printf("    [--fuzz-test]\t\t\tRandomly perturb program input to test error conditions\n");
     printf("    [--fuzz-seed=<value>]\t\tSeed value for RNG for fuzz testing\n");
     printf("    [--opt=<option>]\t\t\tSet optimization option\n");
@@ -156,6 +168,12 @@ devUsage(int ret) {
     printf("        disable-uniform-control-flow\t\tDisable uniform control flow optimizations\n");
     printf("        disable-uniform-memory-optimizations\tDisable uniform-based coherent memory access\n");
     printf("    [--yydebug]\t\t\t\tPrint debugging information during parsing\n");
+    printf("    [--debug-phase=<value>]\t\tSet optimization phases to dump. --debug-phase=first,210:220,300,305,310:last\n");
+
+#if defined(LLVM_3_4) || defined(LLVM_3_5) // only 3.4 and 3.5
+    printf("    [--debug-ir=<value>]\t\tSet optimization phase to generate debugIR after it\n");
+#endif
+    printf("    [--off-phase=<value>]\t\tSwitch off optimization phases. --off-phase=first,210:220,300,305,310:last\n");
     exit(ret);
 }
 
@@ -212,6 +230,47 @@ lSignal(void *) {
 }
 
 
+static int ParsingPhaseName(char * stage) {
+    if (strncmp(stage, "first", 5) == 0) {
+        return 0;
+    }
+    else if (strncmp(stage, "last", 4) == 0) {
+        return LAST_OPT_NUMBER;
+    }
+    else {
+        int t = atoi(stage);
+        if (t < 0 || t > LAST_OPT_NUMBER) {
+            fprintf(stderr, "Phases must be from 0 to %d. %s is incorrect.\n", LAST_OPT_NUMBER, stage);
+            exit(0);
+        }
+        else {
+            return t;
+        }
+    }
+}
+
+
+static std::set<int> ParsingPhases(char * stages) {
+    std::set<int> phases;
+    int begin = ParsingPhaseName(stages);
+    int end = begin;
+
+    for (unsigned i = 0; i < strlen(stages); i++) {
+        if ((stages[i] == ',') || (i == strlen(stages) - 1)) {
+            for (int j = begin; j < end + 1; j++) {
+                phases.insert(j);
+            }
+            begin = ParsingPhaseName(stages + i + 1);
+            end = begin;
+        }
+        else if (stages[i] == ':') {
+            end = ParsingPhaseName(stages + i + 1);
+        }
+    }
+    return phases;
+}
+
+
 static void
 lParseInclude(const char *path) {
 #ifdef ISPC_IS_WINDOWS
@@ -243,12 +302,34 @@ int main(int Argc, char *Argv[]) {
     llvm::sys::AddSignalHandler(lSignal, NULL);
 
     // initialize available LLVM targets
+#ifndef __arm__
+    // FIXME: LLVM build on ARM doesn't build the x86 targets by default.
+    // It's not clear that anyone's going to want to generate x86 from an
+    // ARM host, though...
     LLVMInitializeX86TargetInfo();
     LLVMInitializeX86Target();
     LLVMInitializeX86AsmPrinter();
     LLVMInitializeX86AsmParser();
     LLVMInitializeX86Disassembler();
     LLVMInitializeX86TargetMC();
+#endif // !__ARM__
+
+#ifdef ISPC_ARM_ENABLED
+    // Generating ARM from x86 is more likely to be useful, though.
+    LLVMInitializeARMTargetInfo();
+    LLVMInitializeARMTarget();
+    LLVMInitializeARMAsmPrinter();
+    LLVMInitializeARMAsmParser();
+    LLVMInitializeARMDisassembler();
+    LLVMInitializeARMTargetMC();
+#endif
+
+#ifdef ISPC_NVPTX_ENABLED
+    LLVMInitializeNVPTXTargetInfo();
+    LLVMInitializeNVPTXTarget();
+    LLVMInitializeNVPTXAsmPrinter();
+    LLVMInitializeNVPTXTargetMC();
+#endif /* ISPC_NVPTX_ENABLED */
 
     char *file = NULL;
     const char *headerFileName = NULL;
@@ -261,7 +342,6 @@ int main(int Argc, char *Argv[]) {
     // as we're parsing below
     g = new Globals;
 
-    bool debugSet = false, optSet = false;
     Module::OutputType ot = Module::Object;
     bool generatePIC = false;
     const char *arch = NULL, *cpu = NULL, *target = NULL;
@@ -300,11 +380,12 @@ int main(int Argc, char *Argv[]) {
         }
         else if (!strcmp(argv[i], "--debug"))
             g->debugPrint = true;
+        else if (!strcmp(argv[i], "--dllexport"))
+            g->dllExport = true;
         else if (!strcmp(argv[i], "--instrument"))
             g->emitInstrumentation = true;
         else if (!strcmp(argv[i], "-g")) {
             g->generateDebuggingSymbols = true;
-            debugSet = true;
         }
         else if (!strcmp(argv[i], "--emit-asm"))
             ot = Module::Asm;
@@ -431,12 +512,10 @@ int main(int Argc, char *Argv[]) {
         }
         else if (!strcmp(argv[i], "-O0")) {
             g->opt.level = 0;
-            optSet = true;
         }
         else if (!strcmp(argv[i], "-O") ||  !strcmp(argv[i], "-O1") ||
                  !strcmp(argv[i], "-O2") || !strcmp(argv[i], "-O3")) {
             g->opt.level = 1;
-            optSet = true;
         }
         else if (!strcmp(argv[i], "-"))
             ;
@@ -477,6 +556,21 @@ int main(int Argc, char *Argv[]) {
           }
           hostStubFileName = argv[i];
         }
+        else if (strncmp(argv[i], "--debug-phase=", 14) == 0) {
+            fprintf(stderr, "WARNING: Adding debug phases may change the way PassManager"
+                            "handles the phases and it may possibly make some bugs go"
+                            "away or introduce the new ones.\n");
+            g->debug_stages = ParsingPhases(argv[i] + strlen("--debug-phase="));
+        }
+
+#if defined(LLVM_3_4) || defined(LLVM_3_5) // only 3.4 and 3.5
+        else if (strncmp(argv[i], "--debug-ir=", 11) == 0) {
+            g->debugIR = ParsingPhaseName(argv[i] + strlen("--debug-ir="));
+        }
+#endif
+        else if (strncmp(argv[i], "--off-phase=", 12) == 0) {
+            g->off_stages = ParsingPhases(argv[i] + strlen("--off-phase="));
+        }
         else if (!strcmp(argv[i], "-v") || !strcmp(argv[i], "--version")) {
             lPrintVersion();
             return 0;
@@ -495,12 +589,6 @@ int main(int Argc, char *Argv[]) {
                 file = argv[i];
         }
     }
-
-    // If the user specified -g, then the default optimization level is 0.
-    // If -g wasn't specified, the default optimization level is 1 (full
-    // optimization).
-    if (debugSet && !optSet)
-        g->opt.level = 0;
 
     if (g->enableFuzzTest) {
         if (g->fuzzTestSeed == -1) {

@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2010-2012, Intel Corporation
+  Copyright (c) 2010-2015, Intel Corporation
   All rights reserved.
 
   Redistribution and use in source and binary forms, with or without
@@ -41,11 +41,19 @@
 
 #include "ispc.h"
 #include "ast.h"
+#if defined(LLVM_3_4)
+  #include <llvm/DebugInfo.h>
+#endif
+#if !defined(LLVM_3_2) && !defined(LLVM_3_3) && !defined(LLVM_3_4) // LLVM 3.5+
+  #include <llvm/IR/DebugInfo.h>
+#endif
 
 namespace llvm
 {
     class raw_string_ostream;
 }
+
+struct DispatchHeaderInfo;
 
 class Module {
 public:
@@ -153,6 +161,12 @@ public:
     /** The diBuilder manages generating debugging information */
     llvm::DIBuilder *diBuilder;
 
+#if defined(LLVM_3_4) || defined(LLVM_3_5) || defined(LLVM_3_6)
+    llvm::DICompileUnit diCompileUnit;
+#elif !defined(LLVM_3_2) && !defined(LLVM_3_3) // LLVM 3.7++
+    llvm::MDCompileUnit *diCompileUnit;
+#endif // LLVM_3_4+
+
 private:
     const char *filename;
     AST *ast;
@@ -164,8 +178,10 @@ private:
         filename may be NULL, indicating that output should go to standard
         output. */
     bool writeOutput(OutputType ot, const char *filename,
-                     const char *includeFileName = NULL);
+                     const char *includeFileName = NULL,
+                     DispatchHeaderInfo *DHI = 0);
     bool writeHeader(const char *filename);
+    bool writeDispatchHeader(DispatchHeaderInfo *DHI);
     bool writeDeps(const char *filename);
     bool writeDevStub(const char *filename);
     bool writeHostStub(const char *filename);

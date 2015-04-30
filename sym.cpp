@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2010-2012, Intel Corporation
+  Copyright (c) 2010-2013, Intel Corporation
   All rights reserved.
 
   Redistribution and use in source and binary forms, with or without
@@ -214,6 +214,17 @@ SymbolTable::LookupType(const char *name) const {
     return NULL;
 }
 
+bool
+SymbolTable::ContainsType(const Type *type) const {
+    TypeMapType::const_iterator iter = types.begin();
+    while (iter != types.end()) {
+        if (iter->second == type) {
+            return true;
+        }
+        iter++;
+    }
+    return false;
+}
 
 std::vector<std::string>
 SymbolTable::ClosestVariableOrFunctionMatch(const char *str) const {

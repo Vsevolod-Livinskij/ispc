@@ -1,4 +1,4 @@
-;;  Copyright (c) 2012, Intel Corporation
+;;  Copyright (c) 2012-2013, Intel Corporation
 ;;  All rights reserved.
 ;;
 ;;  Redistribution and use in source and binary forms, with or without
@@ -31,9 +31,8 @@
 
 include(`target-avx.ll')
 
-ifelse(LLVM_VERSION, `LLVM_3_0', `rdrand_decls()',
-       LLVM_VERSION, `LLVM_3_1', `rdrand_decls()',
-       `rdrand_definition()')
+rdrand_definition()
+saturation_arithmetic()
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; int min/max
@@ -75,9 +74,6 @@ gen_gather(double)
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; float/half conversions
 
-ifelse(LLVM_VERSION, `LLVM_3_0', `
-;; nothing to define...
-', `
 declare <8 x float> @llvm.x86.vcvtph2ps.256(<8 x i16>) nounwind readnone
 ; 0 is round nearest even
 declare <8 x i16> @llvm.x86.vcvtps2ph.256(<8 x float>, i32) nounwind readnone
@@ -112,4 +108,3 @@ define i16 @__float_to_half_uniform(float %v) nounwind readnone {
   %r = extractelement <8 x i16> %rv, i32 0
   ret i16 %r
 }
-')

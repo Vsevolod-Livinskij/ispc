@@ -2,6 +2,75 @@
 ispc News
 =========
 
+ispc 1.8.1 is Released
+----------------------
+
+A minor update of ``ispc`` with several important stability fixes has been
+released. Problem with auto-dispatch on Linux is fixed (affects only pre-built
+binaries), the problem with -O2 -g is also fixed. There are several
+improvements in Xeon Phi support. Similar to 1.8.0 all binaries are based on
+LLVM 3.5.
+
+ispc 1.8.0 is Released
+----------------------
+
+A major new version of ``ispc``, which introduces experimental support for NVPTX
+target, brings numerous improvements to our KNC (Xeon Phi) support, introduces
+debugging support on Windows and fixes several bugs. We also ship experimental
+build for Sony PlayStation4 target in this release. Binaries for all platforms
+are based on LLVM 3.5.
+
+ispc 1.7.0 is Released
+----------------------
+
+A major new version of ``ispc`` with several language and library extensions and
+fixes in debug info support. Binaries for all platforms are based on patched
+version on LLVM 3.4. There also performance improvements beyond switchover to
+LLVM 3.4.
+
+ispc 1.6.0 is Released
+----------------------
+
+A major update of ``ispc`` has been released. The main focus is on improved 
+performance and stability. Several new targets were added. There are also 
+a number of language and library extensions. Released binaries are based on
+patched LLVM 3.3 on Linux and MacOS and LLVM 3.4rc3 on Windows. Please refer
+to Release Notes for complete set of changes.
+
+ispc 1.5.0 is Released
+----------------------
+
+A major update of ``ispc`` has been released with several new targets available
+and bunch of performance and stability fixes. The released binaries are built
+with patched version of LLVM 3.3. Please refer to Release Notes for complete
+set of changes.
+
+ispc 1.4.4 is Released
+----------------------
+
+A minor update of ``ispc`` has been released with several stability improvements.
+The released binaries are built with patched version of LLVM 3.3. Since this
+release we also distribute 32 bit Linux binaries.
+
+ispc 1.4.3 is Released
+----------------------
+
+A minor update of ``ispc`` has been released with several stability improvements.
+All tests and examples now properly compile and execute on native targets on
+Unix platforms (Linux and MacOS).
+The released binaries are built with patched version of LLVM 3.3.
+
+ispc 1.4.2 is Released
+----------------------
+
+A minor update of ``ispc`` has been released with stability fix for AVX2
+(Haswell), fix for Win32 platform and performance improvements on Xeon Phi.
+As usual, it's available on all supported platforms (Windows, Linux and MacOS).
+This version supports LLVM 3.1, 3.2, 3.3 and 3.4, but now we are recommending
+to avoid 3.1, as it's known to contain a number of stability problems and we are
+planning to deprecate its support soon.
+The released binaries are built with 3.3.
+
 ispc 1.4.1 is Released
 ----------------------
 

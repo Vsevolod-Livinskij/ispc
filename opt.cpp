@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2010-2013, Intel Corporation
+  Copyright (c) 2010-2015, Intel Corporation
   All rights reserved.
 
   Redistribution and use in source and binary forms, with or without
@@ -48,13 +48,16 @@
 #include <set>
 
 #include <llvm/Pass.h>
-#if defined(LLVM_3_1) || defined(LLVM_3_2)
+#if defined(LLVM_3_2)
   #include <llvm/Module.h>
   #include <llvm/Instructions.h>
   #include <llvm/Intrinsics.h>
   #include <llvm/Function.h>
   #include <llvm/BasicBlock.h>
   #include <llvm/Constants.h>
+#ifdef ISPC_NVPTX_ENABLED
+  #include <llvm/InlineAsm.h>
+#endif /* ISPC_NVPTX_ENABLED */
 #else
   #include <llvm/IR/Module.h>
   #include <llvm/IR/Instructions.h>
@@ -62,35 +65,55 @@
   #include <llvm/IR/Function.h>
   #include <llvm/IR/BasicBlock.h>
   #include <llvm/IR/Constants.h>
+#ifdef ISPC_NVPTX_ENABLED
+  #include <llvm/IR/InlineAsm.h>
+#endif /* ISPC_NVPTX_ENABLED */
 #endif
-#include <llvm/PassManager.h>
+#if !defined(LLVM_3_2) && !defined(LLVM_3_3) // LLVM 3.4+
+  #include <llvm/Transforms/Instrumentation.h>
+#endif
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5) || defined(LLVM_3_6)
+  #include "llvm/PassManager.h"
+#else // LLVM 3.7+
+  #include "llvm/IR/LegacyPassManager.h"
+#endif
 #include <llvm/PassRegistry.h>
-#include <llvm/Assembly/PrintModulePass.h>
+#if !defined(LLVM_3_2) && !defined(LLVM_3_3) && !defined(LLVM_3_4) // LLVM 3.5+
+    #include <llvm/IR/Verifier.h>
+    #include <llvm/IR/IRPrintingPasses.h>
+    #include <llvm/IR/PatternMatch.h>
+    #include <llvm/IR/DebugInfo.h>
+#else
+    #include <llvm/Analysis/Verifier.h>
+    #include <llvm/Assembly/PrintModulePass.h>
+    #include <llvm/Support/PatternMatch.h>
+    #include <llvm/DebugInfo.h>
+#endif
 #include <llvm/Analysis/ConstantFolding.h>
-#include <llvm/Target/TargetLibraryInfo.h>
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5) || defined(LLVM_3_6)
+    #include <llvm/Target/TargetLibraryInfo.h>
+#else // LLVM 3.7+
+    #include <llvm/Analysis/TargetLibraryInfo.h>
+#endif
 #include <llvm/ADT/Triple.h>
+#include <llvm/ADT/SmallSet.h>
 #include <llvm/Transforms/Scalar.h>
 #include <llvm/Transforms/IPO.h>
 #include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #include <llvm/Target/TargetOptions.h>
-#if defined(LLVM_3_1)
-  #include <llvm/Target/TargetData.h>
-#elif defined(LLVM_3_2)
+#if defined(LLVM_3_2)
   #include <llvm/DataLayout.h>
 #else // LLVM 3.3+
   #include <llvm/IR/DataLayout.h>
   #include <llvm/Analysis/TargetTransformInfo.h>
 #endif
 #include <llvm/Target/TargetMachine.h>
-#include <llvm/Analysis/Verifier.h>
 #include <llvm/Analysis/Passes.h>
 #include <llvm/Support/raw_ostream.h>
-#if defined(LLVM_3_1)
-  #include <llvm/Analysis/DebugInfo.h>
-#else
-  #include <llvm/DebugInfo.h>
-#endif
 #include <llvm/Support/Dwarf.h>
+#if !defined(LLVM_3_2) && !defined(LLVM_3_3) && !defined(LLVM_3_4) && !defined(LLVM_3_5)
+  #include <llvm/IR/IntrinsicInst.h>
+#endif
 #ifdef ISPC_IS_LINUX
   #include <alloca.h>
 #elif defined(ISPC_IS_WINDOWS)
@@ -108,7 +131,8 @@
 #endif
 
 static llvm::Pass *CreateIntrinsicsOptPass();
-static llvm::Pass *CreateVSelMovmskOptPass();
+static llvm::Pass *CreateInstructionSimplifyPass();
+static llvm::Pass *CreatePeepholePass();
 
 static llvm::Pass *CreateImproveMemoryOpsPass();
 static llvm::Pass *CreateGatherCoalescePass();
@@ -116,6 +140,15 @@ static llvm::Pass *CreateReplacePseudoMemoryOpsPass();
 
 static llvm::Pass *CreateIsCompileTimeConstantPass(bool isLastTry);
 static llvm::Pass *CreateMakeInternalFuncsStaticPass();
+
+static llvm::Pass *CreateDebugPass(char * output);
+
+static llvm::Pass *CreateReplaceStdlibShiftPass();
+
+static llvm::Pass *CreateFixBooleanSelectPass();
+#ifdef ISPC_NVPTX_ENABLED
+static llvm::Pass *CreatePromoteLocalToPrivatePass();
+#endif /* ISPC_NVPTX_ENABLED */
 
 #define DEBUG_START_PASS(NAME)                                 \
     if (g->debugPrint &&                                       \
@@ -161,6 +194,7 @@ lCopyMetadata(llvm::Value *vto, const llvm::Instruction *from) {
         return;
 
     llvm::SmallVector<std::pair<unsigned int, llvm::MDNode *>, 8> metadata;
+
     from->getAllMetadata(metadata);
     for (unsigned int i = 0; i < metadata.size(); ++i)
         to->setMetadata(metadata[i].first, metadata[i].second);
@@ -195,6 +229,7 @@ lGetSourcePosFromMetadata(const llvm::Instruction *inst, SourcePos *pos) {
     llvm::MDNode *first_column = inst->getMetadata("first_column");
     llvm::MDNode *last_line = inst->getMetadata("last_line");
     llvm::MDNode *last_column = inst->getMetadata("last_column");
+
     if (!filename || !first_line || !first_column || !last_line || !last_column)
         return false;
 
@@ -203,16 +238,35 @@ lGetSourcePosFromMetadata(const llvm::Instruction *inst, SourcePos *pos) {
     llvm::MDString *str = llvm::dyn_cast<llvm::MDString>(filename->getOperand(0));
     Assert(str);
     llvm::ConstantInt *first_lnum =
+#if defined (LLVM_3_2) || defined (LLVM_3_3)|| defined (LLVM_3_4)|| defined (LLVM_3_5)
         llvm::dyn_cast<llvm::ConstantInt>(first_line->getOperand(0));
+#else // LLVN 3.6++
+        llvm::mdconst::extract<llvm::ConstantInt>(first_line->getOperand(0));
+#endif
     Assert(first_lnum);
+
     llvm::ConstantInt *first_colnum =
+#if defined (LLVM_3_2) || defined (LLVM_3_3)|| defined (LLVM_3_4)|| defined (LLVM_3_5)
         llvm::dyn_cast<llvm::ConstantInt>(first_column->getOperand(0));
+#else // LLVN 3.6++
+        llvm::mdconst::extract<llvm::ConstantInt>(first_column->getOperand(0));
+#endif
     Assert(first_column);
+
     llvm::ConstantInt *last_lnum =
+#if defined (LLVM_3_2) || defined (LLVM_3_3)|| defined (LLVM_3_4)|| defined (LLVM_3_5)
         llvm::dyn_cast<llvm::ConstantInt>(last_line->getOperand(0));
+#else // LLVN 3.6++
+        llvm::mdconst::extract<llvm::ConstantInt>(last_line->getOperand(0));
+#endif
     Assert(last_lnum);
+
     llvm::ConstantInt *last_colnum =
+#if defined (LLVM_3_2) || defined (LLVM_3_3)|| defined (LLVM_3_4)|| defined (LLVM_3_5)
         llvm::dyn_cast<llvm::ConstantInt>(last_column->getOperand(0));
+#else // LLVN 3.6++
+        llvm::mdconst::extract<llvm::ConstantInt>(last_column->getOperand(0));
+#endif
     Assert(last_column);
 
     *pos = SourcePos(str->getString().data(), (int)first_lnum->getZExtValue(),
@@ -276,8 +330,13 @@ lGEPInst(llvm::Value *ptr, llvm::Value *offset, const char *name,
          llvm::Instruction *insertBefore) {
     llvm::Value *index[1] = { offset };
     llvm::ArrayRef<llvm::Value *> arrayRef(&index[0], &index[1]);
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5) || defined(LLVM_3_6)
     return llvm::GetElementPtrInst::Create(ptr, arrayRef, name,
                                            insertBefore);
+#else // LLVM 3.7++
+    return llvm::GetElementPtrInst::Create(PTYPE(ptr), ptr, arrayRef,
+                                           name, insertBefore);
+#endif
 }
 
 
@@ -340,6 +399,8 @@ lGetMask(llvm::Value *factor, uint64_t *mask) {
                 llvm::dyn_cast<llvm::Constant>(cv->getOperand(i));
             if (c == NULL)
                 return false;
+            if (llvm::isa<llvm::ConstantExpr>(cv->getOperand(i)) )
+                return false; // We can not handle constant expressions here
             elements.push_back(c);
         }
         *mask = lConstElementsToMask(elements);
@@ -394,6 +455,62 @@ lGetMaskStatus(llvm::Value *mask, int vecWidth = -1) {
 
 
 ///////////////////////////////////////////////////////////////////////////
+// This is a wrap over class llvm::PassManager. This duplicates PassManager function run()
+//   and change PassManager function add by adding some checks and debug passes.
+//   This wrap can control:
+//   - If we want to switch off optimization with given number.
+//   - If we want to dump LLVM IR after optimization with given number.
+//   - If we want to generate LLVM IR debug for gdb after optimization with given number.
+class DebugPassManager {
+public:
+    DebugPassManager():number(0){}
+    void add(llvm::Pass * P, int stage);
+    bool run(llvm::Module& M) {return PM.run(M);}
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5) || defined(LLVM_3_6)
+    llvm::PassManager& getPM() {return PM;}
+#else // LLVM 3.7+
+    llvm::legacy::PassManager& getPM() {return PM;}
+#endif
+private:
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5) || defined(LLVM_3_6)
+    llvm::PassManager PM;
+#else // LLVM 3.7+
+    llvm::legacy::PassManager PM;
+#endif
+    int number;
+};
+
+void
+DebugPassManager::add(llvm::Pass * P, int stage = -1) {
+    // taking number of optimization
+    if (stage == -1) {
+        number++;
+    }
+    else {
+        number = stage;
+    }
+    if (g->off_stages.find(number) == g->off_stages.end()) {
+        // adding optimization (not switched off)
+        PM.add(P);
+        if (g->debug_stages.find(number) != g->debug_stages.end()) {
+            // adding dump of LLVM IR after optimization
+            char buf[100];
+            sprintf(buf, "\n\n*****LLVM IR after phase %d: %s*****\n\n",
+                number, P->getPassName());
+            PM.add(CreateDebugPass(buf));
+        }
+
+#if defined(LLVM_3_4) || defined(LLVM_3_5) // only 3.4 and 3.5
+        if (g->debugIR == number) {
+            // adding generating of LLVM IR debug after optimization
+            char buf[100];
+            sprintf(buf, "Debug_IR_after_%d_phase.bc", number);
+            PM.add(llvm::createDebugIRPass(true, true, ".", buf));
+        }
+#endif
+    }
+}
+///////////////////////////////////////////////////////////////////////////
 
 void
 Optimize(llvm::Module *module, int optLevel) {
@@ -401,32 +518,36 @@ Optimize(llvm::Module *module, int optLevel) {
         printf("*** Code going into optimization ***\n");
         module->dump();
     }
+    DebugPassManager optPM;
+    optPM.add(llvm::createVerifierPass(),0);
 
-    llvm::PassManager optPM;
-    optPM.add(llvm::createVerifierPass());
-
-#if 0
-    std::string err;
-    optPM.add(llvm::createPrintModulePass(new llvm::raw_fd_ostream("-", err)));
-#endif
-
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5) || defined(LLVM_3_6)
     llvm::TargetLibraryInfo *targetLibraryInfo =
         new llvm::TargetLibraryInfo(llvm::Triple(module->getTargetTriple()));
     optPM.add(targetLibraryInfo);
+#else // LLVM 3.7+
+    optPM.add(new llvm::TargetLibraryInfoWrapperPass(llvm::Triple(module->getTargetTriple())));
+#endif
 
-
-#if defined(LLVM_3_1)
-    optPM.add(new llvm::TargetData(*g->target->getDataLayout()));
-#else
+#if defined(LLVM_3_2) || defined(LLVM_3_3) || defined(LLVM_3_4)
     optPM.add(new llvm::DataLayout(*g->target->getDataLayout()));
+#elif defined(LLVM_3_5)
+    optPM.add(new llvm::DataLayoutPass(*g->target->getDataLayout()));
+#elif defined(LLVM_3_6)
+    llvm::DataLayoutPass *dlp= new llvm::DataLayoutPass();
+    dlp->doInitialization(*module);
+    optPM.add(dlp);
+#endif // LLVM 3.7+ doesn't have DataLayoutPass anymore.
 
     llvm::TargetMachine *targetMachine = g->target->GetTargetMachine();
-  #ifdef LLVM_3_2
+
+#ifdef LLVM_3_2
     optPM.add(new llvm::TargetTransformInfo(targetMachine->getScalarTargetTransformInfo(),
                                             targetMachine->getVectorTargetTransformInfo()));
-  #else // LLVM 3.3+
-    targetMachine->addAnalysisPasses(optPM);
-  #endif
+#elif defined(LLVM_3_3) || defined(LLVM_3_4) || defined(LLVM_3_5) || defined(LLVM_3_6) // LLVM 3.3 - 3.6
+    targetMachine->addAnalysisPasses(optPM.getPM());
+#else // LLVM 3.7+
+    optPM.getPM().add(createTargetTransformInfoWrapperPass(targetMachine->getTargetIRAnalysis()));
 #endif
 
     optPM.add(llvm::createIndVarSimplifyPass());
@@ -437,11 +558,17 @@ Optimize(llvm::Module *module, int optLevel) {
         // run absolutely no optimizations, since the front-end needs us to
         // take the various __pseudo_* functions it has emitted and turn
         // them into something that can actually execute.
-        optPM.add(CreateImproveMemoryOpsPass());
+        optPM.add(CreateImproveMemoryOpsPass(), 100);
+#ifdef ISPC_NVPTX_ENABLED
+        if (g->opt.disableGatherScatterOptimizations == false &&
+            g->target->getVectorWidth() > 1) 
+#endif /* ISPC_NVPTX_ENABLED */
+          optPM.add(CreateImproveMemoryOpsPass(), 100);
+
         if (g->opt.disableHandlePseudoMemoryOps == false)
             optPM.add(CreateReplacePseudoMemoryOpsPass());
 
-        optPM.add(CreateIntrinsicsOptPass());
+        optPM.add(CreateIntrinsicsOptPass(), 102);
         optPM.add(CreateIsCompileTimeConstantPass(true));
         optPM.add(llvm::createFunctionInliningPass());
         optPM.add(CreateMakeInternalFuncsStaticPass());
@@ -460,25 +587,47 @@ Optimize(llvm::Module *module, int optLevel) {
         llvm::initializeInstrumentation(*registry);
         llvm::initializeTarget(*registry);
 
-        optPM.add(llvm::createGlobalDCEPass());
+        optPM.add(llvm::createGlobalDCEPass(), 185);
+
+        // Setup to use LLVM default AliasAnalysis
+        // Ideally, we want call:
+        //    llvm::PassManagerBuilder pm_Builder;
+        //    pm_Builder.OptLevel = optLevel;
+        //    pm_Builder.addInitialAliasAnalysisPasses(optPM);
+        // but the addInitialAliasAnalysisPasses() is a private function
+        // so we explicitly enable them here.
+        // Need to keep sync with future LLVM change
+        // An alternative is to call populateFunctionPassManager()
+        optPM.add(llvm::createTypeBasedAliasAnalysisPass(), 190);
+        optPM.add(llvm::createBasicAliasAnalysisPass());
+        optPM.add(llvm::createCFGSimplificationPass());
+        // Here clang has an experimental pass SROAPass instead of
+        // ScalarReplAggregatesPass. We should add it in the future.
+        optPM.add(llvm::createScalarReplAggregatesPass());
+        optPM.add(llvm::createEarlyCSEPass());
+        optPM.add(llvm::createLowerExpectIntrinsicPass());
 
         // Early optimizations to try to reduce the total amount of code to
         // work with if we can
-        optPM.add(llvm::createReassociatePass());
+        optPM.add(llvm::createReassociatePass(), 200);
         optPM.add(llvm::createConstantPropagationPass());
         optPM.add(llvm::createDeadInstEliminationPass());
         optPM.add(llvm::createCFGSimplificationPass());
 
+        optPM.add(llvm::createPromoteMemoryToRegisterPass());
+        optPM.add(llvm::createAggressiveDCEPass());
+
+
         if (g->opt.disableGatherScatterOptimizations == false &&
             g->target->getVectorWidth() > 1) {
-            optPM.add(llvm::createInstructionCombiningPass());
+            optPM.add(llvm::createInstructionCombiningPass(), 210);
             optPM.add(CreateImproveMemoryOpsPass());
         }
         if (!g->opt.disableMaskAllOnOptimizations) {
-            optPM.add(CreateIntrinsicsOptPass());
-            optPM.add(CreateVSelMovmskOptPass());
+            optPM.add(CreateIntrinsicsOptPass(), 215);
+            optPM.add(CreateInstructionSimplifyPass());
         }
-        optPM.add(llvm::createDeadInstEliminationPass());
+        optPM.add(llvm::createDeadInstEliminationPass(), 220);
 
         // Max struct size threshold for scalar replacement is
         //    1) 4 fields (r,g,b,w)
@@ -494,7 +643,13 @@ Optimize(llvm::Module *module, int optLevel) {
         optPM.add(llvm::createGlobalOptimizerPass());
         optPM.add(llvm::createReassociatePass());
         optPM.add(llvm::createIPConstantPropagationPass());
-        optPM.add(llvm::createDeadArgEliminationPass());
+
+#ifdef ISPC_NVPTX_ENABLED
+        if (g->target->getISA() != Target::NVPTX)
+#endif /* ISPC_NVPTX_ENABLED */
+          optPM.add(CreateReplaceStdlibShiftPass(),229);
+
+        optPM.add(llvm::createDeadArgEliminationPass(),230);
         optPM.add(llvm::createInstructionCombiningPass());
         optPM.add(llvm::createCFGSimplificationPass());
         optPM.add(llvm::createPruneEHPass());
@@ -505,8 +660,13 @@ Optimize(llvm::Module *module, int optLevel) {
         optPM.add(llvm::createCFGSimplificationPass());
 
         optPM.add(llvm::createArgumentPromotionPass());
-        optPM.add(llvm::createSimplifyLibCallsPass());
-        optPM.add(llvm::createInstructionCombiningPass());
+#if defined(LLVM_3_2) || defined(LLVM_3_3)
+        // Starting from 3.4 this functionality was moved to
+        // InstructionCombiningPass. See r184459 for details.
+        optPM.add(llvm::createSimplifyLibCallsPass(), 240);
+#endif
+        optPM.add(llvm::createAggressiveDCEPass());
+        optPM.add(llvm::createInstructionCombiningPass(), 241);
         optPM.add(llvm::createJumpThreadingPass());
         optPM.add(llvm::createCFGSimplificationPass());
         optPM.add(llvm::createScalarReplAggregatesPass(sr_threshold));
@@ -514,90 +674,211 @@ Optimize(llvm::Module *module, int optLevel) {
         optPM.add(llvm::createTailCallEliminationPass());
 
         if (!g->opt.disableMaskAllOnOptimizations) {
-            optPM.add(CreateIntrinsicsOptPass());
-            optPM.add(CreateVSelMovmskOptPass());
+            optPM.add(CreateIntrinsicsOptPass(), 250);
+            optPM.add(CreateInstructionSimplifyPass());
         }
 
         if (g->opt.disableGatherScatterOptimizations == false &&
             g->target->getVectorWidth() > 1) {
-            optPM.add(llvm::createInstructionCombiningPass());
+            optPM.add(llvm::createInstructionCombiningPass(), 255);
             optPM.add(CreateImproveMemoryOpsPass());
 
             if (g->opt.disableCoalescing == false &&
                 g->target->getISA() != Target::GENERIC) {
                 // It is important to run this here to make it easier to
                 // finding matching gathers we can coalesce..
-                optPM.add(llvm::createEarlyCSEPass());
+                optPM.add(llvm::createEarlyCSEPass(), 260);
                 optPM.add(CreateGatherCoalescePass());
             }
         }
 
-        optPM.add(llvm::createFunctionInliningPass());
+        optPM.add(llvm::createFunctionInliningPass(), 265);
         optPM.add(llvm::createConstantPropagationPass());
         optPM.add(CreateIntrinsicsOptPass());
-        optPM.add(CreateVSelMovmskOptPass());
+        optPM.add(CreateInstructionSimplifyPass());
 
         if (g->opt.disableGatherScatterOptimizations == false &&
             g->target->getVectorWidth() > 1) {
-            optPM.add(llvm::createInstructionCombiningPass());
+            optPM.add(llvm::createInstructionCombiningPass(), 270);
             optPM.add(CreateImproveMemoryOpsPass());
         }
 
-        optPM.add(llvm::createIPSCCPPass());
+        optPM.add(llvm::createIPSCCPPass(), 275);
         optPM.add(llvm::createDeadArgEliminationPass());
+        optPM.add(llvm::createAggressiveDCEPass());
         optPM.add(llvm::createInstructionCombiningPass());
         optPM.add(llvm::createCFGSimplificationPass());
 
-        if (g->opt.disableHandlePseudoMemoryOps == false)
-            optPM.add(CreateReplacePseudoMemoryOpsPass());
-        optPM.add(CreateIntrinsicsOptPass());
-        optPM.add(CreateVSelMovmskOptPass());
+        if (g->opt.disableHandlePseudoMemoryOps == false) {
+            optPM.add(CreateReplacePseudoMemoryOpsPass(),280);
+        }
+        optPM.add(CreateIntrinsicsOptPass(),281);
+        optPM.add(CreateInstructionSimplifyPass());
 
         optPM.add(llvm::createFunctionInliningPass());
         optPM.add(llvm::createArgumentPromotionPass());
         optPM.add(llvm::createScalarReplAggregatesPass(sr_threshold, false));
         optPM.add(llvm::createInstructionCombiningPass());
+        optPM.add(CreateInstructionSimplifyPass());
         optPM.add(llvm::createCFGSimplificationPass());
         optPM.add(llvm::createReassociatePass());
         optPM.add(llvm::createLoopRotatePass());
         optPM.add(llvm::createLICMPass());
         optPM.add(llvm::createLoopUnswitchPass(false));
         optPM.add(llvm::createInstructionCombiningPass());
+        optPM.add(CreateInstructionSimplifyPass());
         optPM.add(llvm::createIndVarSimplifyPass());
         optPM.add(llvm::createLoopIdiomPass());
         optPM.add(llvm::createLoopDeletionPass());
-        if (g->opt.unrollLoops)
-            optPM.add(llvm::createLoopUnrollPass());
-        optPM.add(llvm::createGVNPass());
+        if (g->opt.unrollLoops) {
+            optPM.add(llvm::createLoopUnrollPass(), 300);
+        }
+        optPM.add(llvm::createGVNPass(), 301);
 
         optPM.add(CreateIsCompileTimeConstantPass(true));
         optPM.add(CreateIntrinsicsOptPass());
-        optPM.add(CreateVSelMovmskOptPass());
+        optPM.add(CreateInstructionSimplifyPass());
 
         optPM.add(llvm::createMemCpyOptPass());
         optPM.add(llvm::createSCCPPass());
         optPM.add(llvm::createInstructionCombiningPass());
+        optPM.add(CreateInstructionSimplifyPass());
         optPM.add(llvm::createJumpThreadingPass());
         optPM.add(llvm::createCorrelatedValuePropagationPass());
         optPM.add(llvm::createDeadStoreEliminationPass());
         optPM.add(llvm::createAggressiveDCEPass());
         optPM.add(llvm::createCFGSimplificationPass());
         optPM.add(llvm::createInstructionCombiningPass());
+        optPM.add(CreateInstructionSimplifyPass());
+        optPM.add(CreatePeepholePass());
+        optPM.add(llvm::createFunctionInliningPass());
+        optPM.add(llvm::createAggressiveDCEPass());
         optPM.add(llvm::createStripDeadPrototypesPass());
         optPM.add(CreateMakeInternalFuncsStaticPass());
         optPM.add(llvm::createGlobalDCEPass());
         optPM.add(llvm::createConstantMergePass());
+
+        // Should be the last
+        optPM.add(CreateFixBooleanSelectPass(), 400);
+#ifdef ISPC_NVPTX_ENABLED
+        if (g->target->getISA() == Target::NVPTX)
+        {
+          optPM.add(CreatePromoteLocalToPrivatePass());
+          optPM.add(llvm::createGlobalDCEPass());
+
+          optPM.add(llvm::createTypeBasedAliasAnalysisPass());
+          optPM.add(llvm::createBasicAliasAnalysisPass());
+          optPM.add(llvm::createCFGSimplificationPass());
+          // Here clang has an experimental pass SROAPass instead of
+          // ScalarReplAggregatesPass. We should add it in the future.
+          optPM.add(llvm::createScalarReplAggregatesPass());
+          optPM.add(llvm::createEarlyCSEPass());
+          optPM.add(llvm::createLowerExpectIntrinsicPass());
+          optPM.add(llvm::createTypeBasedAliasAnalysisPass());
+          optPM.add(llvm::createBasicAliasAnalysisPass());
+
+          // Early optimizations to try to reduce the total amount of code to
+          // work with if we can
+          optPM.add(llvm::createReassociatePass());
+          optPM.add(llvm::createConstantPropagationPass());
+          optPM.add(llvm::createDeadInstEliminationPass());
+          optPM.add(llvm::createCFGSimplificationPass());
+
+          optPM.add(llvm::createPromoteMemoryToRegisterPass());
+          optPM.add(llvm::createAggressiveDCEPass());
+
+
+          optPM.add(llvm::createInstructionCombiningPass());
+          optPM.add(llvm::createDeadInstEliminationPass());
+
+          // On to more serious optimizations
+          optPM.add(llvm::createInstructionCombiningPass());
+          optPM.add(llvm::createCFGSimplificationPass());
+          optPM.add(llvm::createPromoteMemoryToRegisterPass());
+          optPM.add(llvm::createGlobalOptimizerPass());
+          optPM.add(llvm::createReassociatePass());
+          optPM.add(llvm::createIPConstantPropagationPass());
+
+          optPM.add(llvm::createDeadArgEliminationPass());
+          optPM.add(llvm::createInstructionCombiningPass());
+          optPM.add(llvm::createCFGSimplificationPass());
+          optPM.add(llvm::createPruneEHPass());
+          optPM.add(llvm::createFunctionAttrsPass());
+          optPM.add(llvm::createFunctionInliningPass());
+          optPM.add(llvm::createConstantPropagationPass());
+          optPM.add(llvm::createDeadInstEliminationPass());
+          optPM.add(llvm::createCFGSimplificationPass());
+
+          optPM.add(llvm::createArgumentPromotionPass());
+#if defined(LLVM_3_1) || defined(LLVM_3_2) || defined(LLVM_3_3)
+          // Starting from 3.4 this functionality was moved to
+          // InstructionCombiningPass. See r184459 for details.
+          optPM.add(llvm::createSimplifyLibCallsPass());
+#endif
+          optPM.add(llvm::createAggressiveDCEPass());
+          optPM.add(llvm::createInstructionCombiningPass());
+          optPM.add(llvm::createJumpThreadingPass());
+          optPM.add(llvm::createCFGSimplificationPass());
+          optPM.add(llvm::createInstructionCombiningPass());
+          optPM.add(llvm::createTailCallEliminationPass());
+
+          optPM.add(llvm::createInstructionCombiningPass());
+
+          optPM.add(llvm::createFunctionInliningPass());
+          optPM.add(llvm::createConstantPropagationPass());
+
+          optPM.add(llvm::createInstructionCombiningPass());
+
+          optPM.add(llvm::createIPSCCPPass());
+          optPM.add(llvm::createDeadArgEliminationPass());
+          optPM.add(llvm::createAggressiveDCEPass());
+          optPM.add(llvm::createInstructionCombiningPass());
+          optPM.add(llvm::createCFGSimplificationPass());
+
+          optPM.add(llvm::createFunctionInliningPass());
+          optPM.add(llvm::createArgumentPromotionPass());
+          optPM.add(llvm::createInstructionCombiningPass());
+          optPM.add(llvm::createCFGSimplificationPass());
+          optPM.add(llvm::createReassociatePass());
+          optPM.add(llvm::createLoopRotatePass());
+          optPM.add(llvm::createLICMPass());
+//          optPM.add(llvm::createLoopUnswitchPass(false));
+#if 1
+          optPM.add(llvm::createInstructionCombiningPass());
+          optPM.add(llvm::createIndVarSimplifyPass());
+          optPM.add(llvm::createLoopIdiomPass());
+          optPM.add(llvm::createLoopDeletionPass());
+          optPM.add(llvm::createLoopUnrollPass());
+          optPM.add(llvm::createGVNPass());
+          optPM.add(llvm::createMemCpyOptPass());
+          optPM.add(llvm::createSCCPPass());
+          optPM.add(llvm::createInstructionCombiningPass());
+          optPM.add(llvm::createJumpThreadingPass());
+          optPM.add(llvm::createCorrelatedValuePropagationPass());
+          optPM.add(llvm::createDeadStoreEliminationPass());
+          optPM.add(llvm::createAggressiveDCEPass());
+          optPM.add(llvm::createCFGSimplificationPass());
+          optPM.add(llvm::createInstructionCombiningPass());
+          optPM.add(llvm::createFunctionInliningPass());
+          optPM.add(llvm::createAggressiveDCEPass());
+          optPM.add(llvm::createStripDeadPrototypesPass());
+          optPM.add(llvm::createGlobalDCEPass());
+          optPM.add(llvm::createConstantMergePass());
+#endif
+        }
+#endif /* ISPC_NVPTX_ENABLED */
     }
 
     // Finish up by making sure we didn't mess anything up in the IR along
     // the way.
-    optPM.add(llvm::createVerifierPass());
+    optPM.add(llvm::createVerifierPass(), LAST_OPT_NUMBER);
     optPM.run(*module);
 
     if (g->debugPrint) {
         printf("\n*****\nFINAL OUTPUT\n*****\n");
         module->dump();
     }
+
 }
 
 
@@ -666,21 +947,29 @@ IntrinsicsOpt::IntrinsicsOpt()
     // All of the mask instructions we may encounter.  Note that even if
     // compiling for AVX, we may still encounter the regular 4-wide SSE
     // MOVMSK instruction.
-    llvm::Function *sseMovmsk =
-        llvm::Intrinsic::getDeclaration(m->module, llvm::Intrinsic::x86_sse_movmsk_ps);
-    maskInstructions.push_back(sseMovmsk);
-    maskInstructions.push_back(m->module->getFunction("__movmsk"));
-    llvm::Function *avxMovmsk =
-        llvm::Intrinsic::getDeclaration(m->module, llvm::Intrinsic::x86_avx_movmsk_ps_256);
-    Assert(avxMovmsk != NULL);
-    maskInstructions.push_back(avxMovmsk);
+    if (llvm::Function *ssei8Movmsk =
+        m->module->getFunction(llvm::Intrinsic::getName(llvm::Intrinsic::x86_sse2_pmovmskb_128))) {
+        maskInstructions.push_back(ssei8Movmsk);
+    }
+    if (llvm::Function *sseFloatMovmsk =
+        m->module->getFunction(llvm::Intrinsic::getName(llvm::Intrinsic::x86_sse_movmsk_ps))) {
+        maskInstructions.push_back(sseFloatMovmsk);
+    }
+    if (llvm::Function *__movmsk = 
+        m->module->getFunction("__movmsk")) {
+        maskInstructions.push_back(__movmsk);
+    }
+    if (llvm::Function *avxFloatMovmsk =
+        m->module->getFunction(llvm::Intrinsic::getName(llvm::Intrinsic::x86_avx_movmsk_ps_256))) {
+        maskInstructions.push_back(avxFloatMovmsk);
+    }
 
     // And all of the blend instructions
     blendInstructions.push_back(BlendInstruction(
-        llvm::Intrinsic::getDeclaration(m->module, llvm::Intrinsic::x86_sse41_blendvps),
+        m->module->getFunction(llvm::Intrinsic::getName(llvm::Intrinsic::x86_sse41_blendvps)),
         0xf, 0, 1, 2));
     blendInstructions.push_back(BlendInstruction(
-        llvm::Intrinsic::getDeclaration(m->module, llvm::Intrinsic::x86_avx_blendv_ps_256),
+        m->module->getFunction(llvm::Intrinsic::getName(llvm::Intrinsic::x86_avx_blendv_ps_256)),
         0xff, 0, 1, 2));
 }
 
@@ -712,15 +1001,13 @@ IntrinsicsOpt::runOnBasicBlock(llvm::BasicBlock &bb) {
     DEBUG_START_PASS("IntrinsicsOpt");
 
     llvm::Function *avxMaskedLoad32 =
-        llvm::Intrinsic::getDeclaration(m->module, llvm::Intrinsic::x86_avx_maskload_ps_256);
+        m->module->getFunction(llvm::Intrinsic::getName(llvm::Intrinsic::x86_avx_maskload_ps_256));
     llvm::Function *avxMaskedLoad64 =
-        llvm::Intrinsic::getDeclaration(m->module, llvm::Intrinsic::x86_avx_maskload_pd_256);
+        m->module->getFunction(llvm::Intrinsic::getName(llvm::Intrinsic::x86_avx_maskload_pd_256));
     llvm::Function *avxMaskedStore32 =
-        llvm::Intrinsic::getDeclaration(m->module, llvm::Intrinsic::x86_avx_maskstore_ps_256);
+        m->module->getFunction(llvm::Intrinsic::getName(llvm::Intrinsic::x86_avx_maskstore_ps_256));
     llvm::Function *avxMaskedStore64 =
-        llvm::Intrinsic::getDeclaration(m->module, llvm::Intrinsic::x86_avx_maskstore_pd_256);
-    Assert(avxMaskedLoad32 != NULL && avxMaskedStore32 != NULL);
-    Assert(avxMaskedLoad64 != NULL && avxMaskedStore64 != NULL);
+        m->module->getFunction(llvm::Intrinsic::getName(llvm::Intrinsic::x86_avx_maskstore_pd_256));
 
     bool modifiedAny = false;
  restart:
@@ -823,7 +1110,7 @@ IntrinsicsOpt::runOnBasicBlock(llvm::BasicBlock &bb) {
                     lCopyMetadata(castPtr, callInst);
                     int align;
                     if (g->opt.forceAlignedMemory)
-                        align = 0;
+                        align = g->target->getNativeVectorAlignment();
                     else
                         align = callInst->getCalledFunction() == avxMaskedLoad32 ? 4 : 8;
                     name = LLVMGetName(callInst->getArgOperand(0), "_load");
@@ -865,7 +1152,7 @@ IntrinsicsOpt::runOnBasicBlock(llvm::BasicBlock &bb) {
                         new llvm::StoreInst(rvalue, castPtr, (llvm::Instruction *)NULL);
                     int align;
                     if (g->opt.forceAlignedMemory)
-                        align = 0;
+                        align = g->target->getNativeVectorAlignment();
                     else
                         align = callInst->getCalledFunction() == avxMaskedStore32 ? 4 : 8;
                     storeInst->setAlignment(align);
@@ -887,20 +1174,24 @@ IntrinsicsOpt::runOnBasicBlock(llvm::BasicBlock &bb) {
 
 bool
 IntrinsicsOpt::matchesMaskInstruction(llvm::Function *function) {
-    for (unsigned int i = 0; i < maskInstructions.size(); ++i)
+    for (unsigned int i = 0; i < maskInstructions.size(); ++i) {
         if (maskInstructions[i].function != NULL &&
-            function == maskInstructions[i].function)
+            function == maskInstructions[i].function) {
             return true;
+        }
+    }
     return false;
 }
 
 
 IntrinsicsOpt::BlendInstruction *
 IntrinsicsOpt::matchingBlendInstruction(llvm::Function *function) {
-    for (unsigned int i = 0; i < blendInstructions.size(); ++i)
+    for (unsigned int i = 0; i < blendInstructions.size(); ++i) {
         if (blendInstructions[i].function != NULL &&
-            function == blendInstructions[i].function)
+            function == blendInstructions[i].function) {
             return &blendInstructions[i];
+        }
+    }
     return NULL;
 }
 
@@ -920,80 +1211,159 @@ CreateIntrinsicsOptPass() {
     @todo The better thing to do would be to submit a patch to LLVM to get
     these; they're presumably pretty simple patterns to match.
 */
-class VSelMovmskOpt : public llvm::BasicBlockPass {
+class InstructionSimplifyPass : public llvm::BasicBlockPass {
 public:
-    VSelMovmskOpt()
+    InstructionSimplifyPass()
         : BasicBlockPass(ID) { }
 
     const char *getPassName() const { return "Vector Select Optimization"; }
     bool runOnBasicBlock(llvm::BasicBlock &BB);
 
     static char ID;
+
+private:
+    static bool simplifySelect(llvm::SelectInst *selectInst,
+                               llvm::BasicBlock::iterator iter);
+    static llvm::Value *simplifyBoolVec(llvm::Value *value);
+    static bool simplifyCall(llvm::CallInst *callInst,
+                               llvm::BasicBlock::iterator iter);
 };
 
-char VSelMovmskOpt::ID = 0;
+char InstructionSimplifyPass::ID = 0;
+
+
+llvm::Value *
+InstructionSimplifyPass::simplifyBoolVec(llvm::Value *value) {
+    llvm::TruncInst *trunc = llvm::dyn_cast<llvm::TruncInst>(value);
+    if (trunc != NULL) {
+        // Convert trunc({sext,zext}(i1 vector)) -> (i1 vector)
+        llvm::SExtInst *sext = llvm::dyn_cast<llvm::SExtInst>(value);
+        if (sext &&
+            sext->getOperand(0)->getType() == LLVMTypes::Int1VectorType)
+            return sext->getOperand(0);
+
+        llvm::ZExtInst *zext = llvm::dyn_cast<llvm::ZExtInst>(value);
+        if (zext &&
+            zext->getOperand(0)->getType() == LLVMTypes::Int1VectorType)
+            return zext->getOperand(0);
+    }
+    /*
+      // This optimization has discernable benefit on the perf 
+      // suite on latest LLVM versions.
+      // On 3.4+ (maybe even older), it can result in illegal 
+      // operations, so it's being disabled.
+    llvm::ICmpInst *icmp = llvm::dyn_cast<llvm::ICmpInst>(value);
+    if (icmp != NULL) {
+        // icmp(ne, {sext,zext}(foo), zeroinitializer) -> foo
+        if (icmp->getSignedPredicate() == llvm::CmpInst::ICMP_NE) {
+            llvm::Value *op1 = icmp->getOperand(1);
+            if (llvm::isa<llvm::ConstantAggregateZero>(op1)) {
+                llvm::Value *op0 = icmp->getOperand(0);
+                llvm::SExtInst *sext = llvm::dyn_cast<llvm::SExtInst>(op0);
+                if (sext)
+                    return sext->getOperand(0);
+                llvm::ZExtInst *zext = llvm::dyn_cast<llvm::ZExtInst>(op0);
+                if (zext)
+                    return zext->getOperand(0);
+            }
+        }
+
+    }
+    */
+    return NULL;
+}
 
 
 bool
-VSelMovmskOpt::runOnBasicBlock(llvm::BasicBlock &bb) {
-    DEBUG_START_PASS("VSelMovmaskOpt");
+InstructionSimplifyPass::simplifySelect(llvm::SelectInst *selectInst,
+                                        llvm::BasicBlock::iterator iter) {
+    if (selectInst->getType()->isVectorTy() == false)
+        return false;
+
+    llvm::Value *factor = selectInst->getOperand(0);
+
+    // Simplify all-on or all-off mask values
+    MaskStatus maskStatus = lGetMaskStatus(factor);
+    llvm::Value *value = NULL;
+    if (maskStatus == ALL_ON)
+        // Mask all on -> replace with the first select value
+        value = selectInst->getOperand(1);
+    else if (maskStatus == ALL_OFF)
+        // Mask all off -> replace with the second select value
+        value = selectInst->getOperand(2);
+    if (value != NULL) {
+        llvm::ReplaceInstWithValue(iter->getParent()->getInstList(),
+                                   iter, value);
+        return true;
+    }
+
+    // Sometimes earlier LLVM optimization passes generate unnecessarily
+    // complex expressions for the selection vector, which in turn confuses
+    // the code generators and leads to sub-optimal code (particularly for
+    // 8 and 16-bit masks).  We'll try to simplify them out here so that
+    // the code generator patterns match..
+    if ((factor = simplifyBoolVec(factor)) != NULL) {
+        llvm::Instruction *newSelect =
+            llvm::SelectInst::Create(factor, selectInst->getOperand(1),
+                                     selectInst->getOperand(2),
+                                     selectInst->getName());
+        llvm::ReplaceInstWithInst(selectInst, newSelect);
+        return true;
+    }
+
+    return false;
+}
+
+
+bool
+InstructionSimplifyPass::simplifyCall(llvm::CallInst *callInst,
+                                      llvm::BasicBlock::iterator iter) {
+    llvm::Function *calledFunc = callInst->getCalledFunction();
+
+    // Turn a __movmsk call with a compile-time constant vector into the
+    // equivalent scalar value.
+    if (calledFunc == NULL || calledFunc != m->module->getFunction("__movmsk"))
+        return false;
+
+    uint64_t mask;
+    if (lGetMask(callInst->getArgOperand(0), &mask) == true) {
+        llvm::ReplaceInstWithValue(iter->getParent()->getInstList(),
+                                   iter, LLVMInt64(mask));
+        return true;
+    }
+    return false;
+}
+
+
+bool
+InstructionSimplifyPass::runOnBasicBlock(llvm::BasicBlock &bb) {
+    DEBUG_START_PASS("InstructionSimplify");
 
     bool modifiedAny = false;
 
  restart:
     for (llvm::BasicBlock::iterator iter = bb.begin(), e = bb.end(); iter != e; ++iter) {
         llvm::SelectInst *selectInst = llvm::dyn_cast<llvm::SelectInst>(&*iter);
-        if (selectInst != NULL && selectInst->getType()->isVectorTy()) {
-            llvm::Value *factor = selectInst->getOperand(0);
-
-            MaskStatus maskStatus = lGetMaskStatus(factor);
-            llvm::Value *value = NULL;
-            if (maskStatus == ALL_ON)
-                // Mask all on -> replace with the first select value
-                value = selectInst->getOperand(1);
-            else if (maskStatus == ALL_OFF)
-                // Mask all off -> replace with the second select value
-                value = selectInst->getOperand(2);
-
-            if (value != NULL) {
-                llvm::ReplaceInstWithValue(iter->getParent()->getInstList(),
-                                           iter, value);
-                modifiedAny = true;
-                goto restart;
-            }
+        if (selectInst && simplifySelect(selectInst, iter)) {
+            modifiedAny = true;
+            goto restart;
         }
-
         llvm::CallInst *callInst = llvm::dyn_cast<llvm::CallInst>(&*iter);
-        if (callInst == NULL)
-            continue;
-
-        llvm::Function *calledFunc = callInst->getCalledFunction();
-        if (calledFunc == NULL || calledFunc != m->module->getFunction("__movmsk"))
-            continue;
-
-        uint64_t mask;
-        if (lGetMask(callInst->getArgOperand(0), &mask) == true) {
-#if 0
-            fprintf(stderr, "mask %d\n", mask);
-            callInst->getArgOperand(0)->dump();
-            fprintf(stderr, "-----------\n");
-#endif
-            llvm::ReplaceInstWithValue(iter->getParent()->getInstList(),
-                                       iter, LLVMInt64(mask));
+        if (callInst && simplifyCall(callInst, iter)) {
             modifiedAny = true;
             goto restart;
         }
     }
 
-    DEBUG_END_PASS("VSelMovMskOpt");
+    DEBUG_END_PASS("InstructionSimplify");
 
     return modifiedAny;
 }
 
 
 static llvm::Pass *
-CreateVSelMovmskOptPass() {
-    return new VSelMovmskOpt;
+CreateInstructionSimplifyPass() {
+    return new InstructionSimplifyPass;
 }
 
 
@@ -1034,12 +1404,24 @@ char ImproveMemoryOpsPass::ID = 0;
  */
 static llvm::Value *
 lCheckForActualPointer(llvm::Value *v) {
-    if (v == NULL)
+    if (v == NULL) {
         return NULL;
-    else if (llvm::isa<llvm::PointerType>(v->getType()))
+    }
+    else if (llvm::isa<llvm::PointerType>(v->getType())) {
         return v;
-    else if (llvm::isa<llvm::PtrToIntInst>(v))
+    }
+    else if (llvm::isa<llvm::PtrToIntInst>(v)) {
         return v;
+    }
+    else if (llvm::CastInst *ci = llvm::dyn_cast<llvm::CastInst>(v)) {
+        llvm::Value *t = lCheckForActualPointer(ci->getOperand(0));
+        if (t == NULL) {
+            return NULL;
+        }
+        else {
+            return v;
+        }
+    }
     else {
         llvm::ConstantExpr *uce =
             llvm::dyn_cast<llvm::ConstantExpr>(v);
@@ -1057,26 +1439,21 @@ lCheckForActualPointer(llvm::Value *v) {
     pointer value; otherwise it returns NULL.
  */
 static llvm::Value *
-lGetBasePointer(llvm::Value *v) {
+lGetBasePointer(llvm::Value *v, llvm::Instruction *insertBefore) {
     if (llvm::isa<llvm::InsertElementInst>(v) ||
         llvm::isa<llvm::ShuffleVectorInst>(v)) {
-        llvm::Value *elements[ISPC_MAX_NVEC];
-        LLVMFlattenInsertChain(v, g->target->getVectorWidth(), elements);
-
-        // Make sure none of the elements is undefined.
+        llvm::Value *element = LLVMFlattenInsertChain
+            (v, g->target->getVectorWidth(), true, false);
         // TODO: it's probably ok to allow undefined elements and return
         // the base pointer if all of the other elements have the same
         // value.
-        for (int i = 0; i < g->target->getVectorWidth(); ++i)
-            if (elements[i] == NULL)
-                return NULL;
-
-        // Do all of the elements have the same value?
-        for (int i = 0; i < g->target->getVectorWidth()-1; ++i)
-            if (elements[i] != elements[i+1])
-                return NULL;
-
-        return lCheckForActualPointer(elements[0]);
+        if (element != NULL) {
+            //all elements are the same and not NULLs
+            return lCheckForActualPointer(element);
+        }
+        else {
+            return NULL;
+        }
     }
 
     // This case comes up with global/static arrays
@@ -1085,6 +1462,20 @@ lGetBasePointer(llvm::Value *v) {
     }
     else if (llvm::ConstantDataVector *cdv = llvm::dyn_cast<llvm::ConstantDataVector>(v)) {
         return lCheckForActualPointer(cdv->getSplatValue());
+    }
+    // It is a little bit tricky to use operations with pointers, casted to int with another bit size
+    // but sometimes it is useful, so we handle this case here.
+    else if (llvm::CastInst *ci = llvm::dyn_cast<llvm::CastInst>(v)) {
+        llvm::Value *t = lGetBasePointer(ci->getOperand(0), insertBefore);
+        if (t == NULL) {
+            return NULL;
+        }
+        else {
+            return llvm::CastInst::Create(ci->getOpcode(),
+                                              t, ci->getType()->getScalarType(),
+                                              LLVMGetName(t, "_cast"),
+                                              insertBefore);
+        }
     }
 
     return NULL;
@@ -1139,7 +1530,7 @@ lGetBasePtrAndOffsets(llvm::Value *ptrs, llvm::Value **offsets,
         LLVMDumpValue(ptrs);
     }
 
-    llvm::Value *base = lGetBasePointer(ptrs);
+    llvm::Value *base = lGetBasePointer(ptrs, insertBefore);
     if (base != NULL) {
         // We have a straight up varying pointer with no indexing that's
         // actually all the same value.
@@ -1275,29 +1666,29 @@ lExtractConstantOffset(llvm::Value *vec, llvm::Value **constOffset,
         return;
     }
 
-    llvm::SExtInst *sext = llvm::dyn_cast<llvm::SExtInst>(vec);
-    if (sext != NULL) {
-        // Check the sext target.
+    llvm::CastInst *cast = llvm::dyn_cast<llvm::CastInst>(vec);
+    if (cast != NULL) {
+        // Check the cast target.
         llvm::Value *co, *vo;
-        lExtractConstantOffset(sext->getOperand(0), &co, &vo, insertBefore);
+        lExtractConstantOffset(cast->getOperand(0), &co, &vo, insertBefore);
 
-        // make new sext instructions for the two parts
+        // make new cast instructions for the two parts
         if (co == NULL)
             *constOffset = NULL;
         else
-            *constOffset = new llvm::SExtInst(co, sext->getType(),
-                                              LLVMGetName(co, "_sext"),
+            *constOffset = llvm::CastInst::Create(cast->getOpcode(),
+                                              co, cast->getType(),
+                                              LLVMGetName(co, "_cast"),
                                               insertBefore);
         if (vo == NULL)
             *variableOffset = NULL;
         else
-            *variableOffset = new llvm::SExtInst(vo, sext->getType(),
-                                                 LLVMGetName(vo, "_sext"),
+            *variableOffset = llvm::CastInst::Create(cast->getOpcode(),
+                                                 vo, cast->getType(),
+                                                 LLVMGetName(vo, "_cast"),
                                                  insertBefore);
         return;
     }
-
-    // FIXME? handle bitcasts / type casts here
 
     llvm::BinaryOperator *bop = llvm::dyn_cast<llvm::BinaryOperator>(vec);
     if (bop != NULL) {
@@ -1328,6 +1719,33 @@ lExtractConstantOffset(llvm::Value *vec, llvm::Value **constOffset,
                     llvm::BinaryOperator::Create(llvm::Instruction::Add, v0, v1,
                                                  LLVMGetName("add", v0, v1),
                                                  insertBefore);
+            return;
+        }
+        else if (bop->getOpcode() == llvm::Instruction::Shl) {
+            lExtractConstantOffset(op0, &c0, &v0, insertBefore);
+            lExtractConstantOffset(op1, &c1, &v1, insertBefore);
+
+            // Given the product of constant and variable terms, we have:
+            // (c0 + v0) * (2^(c1 + v1))  = c0 * 2^c1 * 2^v1 + v0 * 2^c1 * 2^v1
+            // We can optimize only if v1 == NULL.
+            if ((v1 != NULL) || (c0 == NULL) || (c1 == NULL)) {
+                *constOffset = NULL;
+                *variableOffset = vec;
+            }
+            else if (v0 == NULL) {
+                *constOffset = vec;
+                *variableOffset = NULL;
+            }
+            else {
+                *constOffset =
+                    llvm::BinaryOperator::Create(llvm::Instruction::Shl, c0, c1,
+                                                 LLVMGetName("shl", c0, c1),
+                                                 insertBefore);
+                *variableOffset =
+                    llvm::BinaryOperator::Create(llvm::Instruction::Shl, v0, c1,
+                                                 LLVMGetName("shl", v0, c1),
+                                                 insertBefore);
+            }
             return;
         }
         else if (bop->getOpcode() == llvm::Instruction::Mul) {
@@ -1463,17 +1881,17 @@ lExtract248Scale(llvm::Value *splatOperand, int splatValue,
  */
 static llvm::Value *
 lExtractOffsetVector248Scale(llvm::Value **vec) {
-    llvm::SExtInst *sext = llvm::dyn_cast<llvm::SExtInst>(*vec);
-    if (sext != NULL) {
-        llvm::Value *sextOp = sext->getOperand(0);
-        // Check the sext target.
-        llvm::Value *scale = lExtractOffsetVector248Scale(&sextOp);
+    llvm::CastInst *cast = llvm::dyn_cast<llvm::CastInst>(*vec);
+    if (cast != NULL) {
+        llvm::Value *castOp = cast->getOperand(0);
+        // Check the cast target.
+        llvm::Value *scale = lExtractOffsetVector248Scale(&castOp);
         if (scale == NULL)
             return NULL;
 
-        // make a new sext instruction so that we end up with the right
+        // make a new cast instruction so that we end up with the right
         // type
-        *vec = new llvm::SExtInst(sextOp, sext->getType(), "offset_sext", sext);
+        *vec = llvm::CastInst::Create(cast->getOpcode(), castOp, cast->getType(), "offset_cast", cast);
         return scale;
     }
 
@@ -1710,7 +2128,7 @@ lIs32BitSafeHelper(llvm::Value *v) {
     // handle Adds, SExts, Constant Vectors
     if (llvm::BinaryOperator *bop = llvm::dyn_cast<llvm::BinaryOperator>(v)) {
         if (bop->getOpcode() == llvm::Instruction::Add) {
-            return lIs32BitSafeHelper(bop->getOperand(0)) 
+            return lIs32BitSafeHelper(bop->getOperand(0))
                 && lIs32BitSafeHelper(bop->getOperand(1));
         }
         return false;
@@ -1761,8 +2179,8 @@ static bool
 lGSToGSBaseOffsets(llvm::CallInst *callInst) {
     struct GSInfo {
         GSInfo(const char *pgFuncName, const char *pgboFuncName,
-               const char *pgbo32FuncName, bool ig)
-            : isGather(ig) {
+               const char *pgbo32FuncName, bool ig, bool ip)
+            : isGather(ig), isPrefetch(ip) {
             func = m->module->getFunction(pgFuncName);
             baseOffsetsFunc = m->module->getFunction(pgboFuncName);
             baseOffsets32Func = m->module->getFunction(pgbo32FuncName);
@@ -1770,6 +2188,7 @@ lGSToGSBaseOffsets(llvm::CallInst *callInst) {
         llvm::Function *func;
         llvm::Function *baseOffsetsFunc, *baseOffsets32Func;
         const bool isGather;
+        const bool isPrefetch;
     };
 
     GSInfo gsFuncs[] = {
@@ -1778,148 +2197,176 @@ lGSToGSBaseOffsets(llvm::CallInst *callInst) {
                "__pseudo_gather_factored_base_offsets32_i8",
                g->target->hasGather() ? "__pseudo_gather_base_offsets32_i8" :
                "__pseudo_gather_factored_base_offsets32_i8",
-               true),
+               true, false),
         GSInfo("__pseudo_gather32_i16",
                g->target->hasGather() ? "__pseudo_gather_base_offsets32_i16" :
                "__pseudo_gather_factored_base_offsets32_i16",
                g->target->hasGather() ? "__pseudo_gather_base_offsets32_i16" :
                "__pseudo_gather_factored_base_offsets32_i16",
-               true),
+               true, false),
         GSInfo("__pseudo_gather32_i32",
                g->target->hasGather() ? "__pseudo_gather_base_offsets32_i32" :
                "__pseudo_gather_factored_base_offsets32_i32",
                g->target->hasGather() ? "__pseudo_gather_base_offsets32_i32" :
                "__pseudo_gather_factored_base_offsets32_i32",
-               true),
+               true, false),
         GSInfo("__pseudo_gather32_float",
                g->target->hasGather() ? "__pseudo_gather_base_offsets32_float" :
                "__pseudo_gather_factored_base_offsets32_float",
                g->target->hasGather() ? "__pseudo_gather_base_offsets32_float" :
                "__pseudo_gather_factored_base_offsets32_float",
-               true),
+               true, false),
         GSInfo("__pseudo_gather32_i64",
                g->target->hasGather() ? "__pseudo_gather_base_offsets32_i64" :
                "__pseudo_gather_factored_base_offsets32_i64",
                g->target->hasGather() ? "__pseudo_gather_base_offsets32_i64" :
                "__pseudo_gather_factored_base_offsets32_i64",
-               true),
+               true, false),
         GSInfo("__pseudo_gather32_double",
                g->target->hasGather() ? "__pseudo_gather_base_offsets32_double" :
                "__pseudo_gather_factored_base_offsets32_double",
                g->target->hasGather() ? "__pseudo_gather_base_offsets32_double" :
                "__pseudo_gather_factored_base_offsets32_double",
-               true),
+               true, false),
 
         GSInfo("__pseudo_scatter32_i8",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_i8" :
                "__pseudo_scatter_factored_base_offsets32_i8",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_i8" :
                "__pseudo_scatter_factored_base_offsets32_i8",
-               false),
+               false, false),
         GSInfo("__pseudo_scatter32_i16",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_i16" :
                "__pseudo_scatter_factored_base_offsets32_i16",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_i16" :
                "__pseudo_scatter_factored_base_offsets32_i16",
-               false),
+               false, false),
         GSInfo("__pseudo_scatter32_i32",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_i32" :
                "__pseudo_scatter_factored_base_offsets32_i32",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_i32" :
                "__pseudo_scatter_factored_base_offsets32_i32",
-               false),
+               false, false),
         GSInfo("__pseudo_scatter32_float",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_float" :
                "__pseudo_scatter_factored_base_offsets32_float",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_float" :
                "__pseudo_scatter_factored_base_offsets32_float",
-               false),
+               false, false),
         GSInfo("__pseudo_scatter32_i64",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_i64" :
                "__pseudo_scatter_factored_base_offsets32_i64",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_i64" :
                "__pseudo_scatter_factored_base_offsets32_i64",
-               false),
+               false, false),
         GSInfo("__pseudo_scatter32_double",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_double" :
                "__pseudo_scatter_factored_base_offsets32_double",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_double" :
                "__pseudo_scatter_factored_base_offsets32_double",
-               false),
+               false, false),
 
         GSInfo("__pseudo_gather64_i8",
                g->target->hasGather() ? "__pseudo_gather_base_offsets64_i8" :
                "__pseudo_gather_factored_base_offsets64_i8",
                g->target->hasGather() ? "__pseudo_gather_base_offsets32_i8" :
                "__pseudo_gather_factored_base_offsets32_i8",
-               true),
+               true, false),
         GSInfo("__pseudo_gather64_i16",
                g->target->hasGather() ? "__pseudo_gather_base_offsets64_i16" :
                "__pseudo_gather_factored_base_offsets64_i16",
                g->target->hasGather() ? "__pseudo_gather_base_offsets32_i16" :
                "__pseudo_gather_factored_base_offsets32_i16",
-               true),
+               true, false),
         GSInfo("__pseudo_gather64_i32",
                g->target->hasGather() ? "__pseudo_gather_base_offsets64_i32" :
                "__pseudo_gather_factored_base_offsets64_i32",
                g->target->hasGather() ? "__pseudo_gather_base_offsets32_i32" :
                "__pseudo_gather_factored_base_offsets32_i32",
-               true),
+               true, false),
         GSInfo("__pseudo_gather64_float",
                g->target->hasGather() ? "__pseudo_gather_base_offsets64_float" :
                "__pseudo_gather_factored_base_offsets64_float",
                g->target->hasGather() ? "__pseudo_gather_base_offsets32_float" :
                "__pseudo_gather_factored_base_offsets32_float",
-               true),
+               true, false),
         GSInfo("__pseudo_gather64_i64",
                g->target->hasGather() ? "__pseudo_gather_base_offsets64_i64" :
                "__pseudo_gather_factored_base_offsets64_i64",
                g->target->hasGather() ? "__pseudo_gather_base_offsets32_i64" :
                "__pseudo_gather_factored_base_offsets32_i64",
-               true),
+               true, false),
         GSInfo("__pseudo_gather64_double",
                g->target->hasGather() ? "__pseudo_gather_base_offsets64_double" :
                "__pseudo_gather_factored_base_offsets64_double",
                g->target->hasGather() ? "__pseudo_gather_base_offsets32_double" :
                "__pseudo_gather_factored_base_offsets32_double",
-               true),
+               true, false),
 
         GSInfo("__pseudo_scatter64_i8",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets64_i8" :
                "__pseudo_scatter_factored_base_offsets64_i8",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_i8" :
                "__pseudo_scatter_factored_base_offsets32_i8",
-               false),
+               false, false),
         GSInfo("__pseudo_scatter64_i16",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets64_i16" :
                "__pseudo_scatter_factored_base_offsets64_i16",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_i16" :
                "__pseudo_scatter_factored_base_offsets32_i16",
-               false),
+               false, false),
         GSInfo("__pseudo_scatter64_i32",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets64_i32" :
                "__pseudo_scatter_factored_base_offsets64_i32",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_i32" :
                "__pseudo_scatter_factored_base_offsets32_i32",
-               false),
+               false, false),
         GSInfo("__pseudo_scatter64_float",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets64_float" :
                "__pseudo_scatter_factored_base_offsets64_float",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_float" :
                "__pseudo_scatter_factored_base_offsets32_float",
-               false),
+               false, false),
         GSInfo("__pseudo_scatter64_i64",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets64_i64" :
                "__pseudo_scatter_factored_base_offsets64_i64",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_i64" :
                "__pseudo_scatter_factored_base_offsets32_i64",
-               false),
+               false, false),
         GSInfo("__pseudo_scatter64_double",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets64_double" :
                "__pseudo_scatter_factored_base_offsets64_double",
                g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_double" :
                "__pseudo_scatter_factored_base_offsets32_double",
-               false),
+               false, false),
+        
+        GSInfo("__pseudo_prefetch_read_varying_1",
+               g->target->hasVecPrefetch() ? "__pseudo_prefetch_read_varying_1_native" : 
+               "__prefetch_read_varying_1",
+               g->target->hasVecPrefetch() ? "__pseudo_prefetch_read_varying_1_native" : 
+               "__prefetch_read_varying_1",
+               false, true),
+
+        GSInfo("__pseudo_prefetch_read_varying_2",
+               g->target->hasVecPrefetch() ? "__pseudo_prefetch_read_varying_2_native" :
+               "__prefetch_read_varying_2",
+               g->target->hasVecPrefetch() ? "__pseudo_prefetch_read_varying_2_native" :
+               "__prefetch_read_varying_2",
+               false, true),
+
+        GSInfo("__pseudo_prefetch_read_varying_3",
+               g->target->hasVecPrefetch() ? "__pseudo_prefetch_read_varying_3_native" :
+               "__prefetch_read_varying_3",
+               g->target->hasVecPrefetch() ? "__pseudo_prefetch_read_varying_3_native" :
+               "__prefetch_read_varying_3",
+               false, true),
+
+        GSInfo("__pseudo_prefetch_read_varying_nt",
+               g->target->hasVecPrefetch() ? "__pseudo_prefetch_read_varying_nt_native" :
+               "__prefetch_read_varying_nt",
+               g->target->hasVecPrefetch() ? "__pseudo_prefetch_read_varying_nt_native" :
+               "__prefetch_read_varying_nt",
+               false, true),
     };
 
     int numGSFuncs = sizeof(gsFuncs) / sizeof(gsFuncs[0]);
@@ -1945,7 +2392,8 @@ lGSToGSBaseOffsets(llvm::CallInst *callInst) {
     llvm::Value *basePtr = lGetBasePtrAndOffsets(ptrs, &offsetVector,
                                                  callInst);
 
-    if (basePtr == NULL || offsetVector == NULL)
+    if (basePtr == NULL || offsetVector == NULL || 
+        (info->isGather == false && info->isPrefetch == true && g->target->hasVecPrefetch() == false))
         // It's actually a fully general gather/scatter with a varying
         // set of base pointers, so leave it as is and continune onward
         // to the next instruction...
@@ -1960,7 +2408,9 @@ lGSToGSBaseOffsets(llvm::CallInst *callInst) {
     llvm::Function *gatherScatterFunc = info->baseOffsetsFunc;
 
     if ((info->isGather == true && g->target->hasGather()) ||
-        (info->isGather == false && g->target->hasScatter())) {
+        (info->isGather == false && info->isPrefetch == false && g->target->hasScatter()) ||
+        (info->isGather == false && info->isPrefetch == true && g->target->hasVecPrefetch())) {
+
         // See if the offsets are scaled by 2, 4, or 8.  If so,
         // extract that scale factor and rewrite the offsets to remove
         // it.
@@ -1974,7 +2424,7 @@ lGSToGSBaseOffsets(llvm::CallInst *callInst) {
             gatherScatterFunc = info->baseOffsets32Func;
         }
 
-        if (info->isGather) {
+        if (info->isGather || info->isPrefetch) {
             llvm::Value *mask = callInst->getArgOperand(1);
 
             // Generate a new function call to the next pseudo gather
@@ -2031,7 +2481,7 @@ lGSToGSBaseOffsets(llvm::CallInst *callInst) {
             gatherScatterFunc = info->baseOffsets32Func;
         }
 
-        if (info->isGather) {
+        if (info->isGather || info->isPrefetch) {
             llvm::Value *mask = callInst->getArgOperand(1);
 
             // Generate a new function call to the next pseudo gather
@@ -2073,13 +2523,14 @@ lGSToGSBaseOffsets(llvm::CallInst *callInst) {
 static bool
 lGSBaseOffsetsGetMoreConst(llvm::CallInst *callInst) {
     struct GSBOInfo {
-        GSBOInfo(const char *pgboFuncName, const char *pgbo32FuncName, bool ig)
-            : isGather(ig) {
+        GSBOInfo(const char *pgboFuncName, const char *pgbo32FuncName, bool ig, bool ip)
+            : isGather(ig), isPrefetch(ip) {
             baseOffsetsFunc = m->module->getFunction(pgboFuncName);
             baseOffsets32Func = m->module->getFunction(pgbo32FuncName);
         }
         llvm::Function *baseOffsetsFunc, *baseOffsets32Func;
         const bool isGather;
+        const bool isPrefetch;
     };
 
     GSBOInfo gsFuncs[] = {
@@ -2087,63 +2538,87 @@ lGSBaseOffsetsGetMoreConst(llvm::CallInst *callInst) {
                                        "__pseudo_gather_factored_base_offsets32_i8",
                  g->target->hasGather() ? "__pseudo_gather_base_offsets32_i8" :
                                        "__pseudo_gather_factored_base_offsets32_i8",
-                 true),
+                 true, false),
         GSBOInfo(g->target->hasGather() ? "__pseudo_gather_base_offsets32_i16" :
                                        "__pseudo_gather_factored_base_offsets32_i16",
                  g->target->hasGather() ? "__pseudo_gather_base_offsets32_i16" :
                                        "__pseudo_gather_factored_base_offsets32_i16",
-                 true),
+                 true, false),
         GSBOInfo(g->target->hasGather() ? "__pseudo_gather_base_offsets32_i32" :
                                        "__pseudo_gather_factored_base_offsets32_i32",
                  g->target->hasGather() ? "__pseudo_gather_base_offsets32_i32" :
                                        "__pseudo_gather_factored_base_offsets32_i32",
-                 true),
+                 true, false),
         GSBOInfo(g->target->hasGather() ? "__pseudo_gather_base_offsets32_float" :
                                        "__pseudo_gather_factored_base_offsets32_float",
                  g->target->hasGather() ? "__pseudo_gather_base_offsets32_float" :
                                        "__pseudo_gather_factored_base_offsets32_float",
-                 true),
+                 true, false),
         GSBOInfo(g->target->hasGather() ? "__pseudo_gather_base_offsets32_i64" :
                                        "__pseudo_gather_factored_base_offsets32_i64",
                  g->target->hasGather() ? "__pseudo_gather_base_offsets32_i64" :
                                        "__pseudo_gather_factored_base_offsets32_i64",
-                 true),
+                 true, false),
         GSBOInfo(g->target->hasGather() ? "__pseudo_gather_base_offsets32_double" :
                                        "__pseudo_gather_factored_base_offsets32_double",
                  g->target->hasGather() ? "__pseudo_gather_base_offsets32_double" :
                                        "__pseudo_gather_factored_base_offsets32_double",
-                 true),
+                 true, false),
 
         GSBOInfo( g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_i8" :
                                          "__pseudo_scatter_factored_base_offsets32_i8",
                   g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_i8" :
                                          "__pseudo_scatter_factored_base_offsets32_i8",
-                  false),
+                  false, false),
         GSBOInfo(g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_i16" :
                                         "__pseudo_scatter_factored_base_offsets32_i16",
                  g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_i16" :
                                         "__pseudo_scatter_factored_base_offsets32_i16",
-                 false),
+                 false, false),
         GSBOInfo(g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_i32" :
                                         "__pseudo_scatter_factored_base_offsets32_i32",
                  g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_i32" :
                                         "__pseudo_scatter_factored_base_offsets32_i32",
-                 false),
+                 false, false),
         GSBOInfo(g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_float" :
                                         "__pseudo_scatter_factored_base_offsets32_float",
                  g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_float" :
                                         "__pseudo_scatter_factored_base_offsets32_float",
-                 false),
+                 false, false),
         GSBOInfo(g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_i64" :
                                         "__pseudo_scatter_factored_base_offsets32_i64",
                  g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_i64" :
                                         "__pseudo_scatter_factored_base_offsets32_i64",
-                 false),
+                 false, false),
         GSBOInfo(g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_double" :
                                         "__pseudo_scatter_factored_base_offsets32_double",
                  g->target->hasScatter() ? "__pseudo_scatter_base_offsets32_double" :
                                         "__pseudo_scatter_factored_base_offsets32_double",
-                 false),
+                 false, false),
+
+        GSBOInfo(g->target->hasVecPrefetch() ? "__pseudo_prefetch_read_varying_1_native" :
+                                            "__prefetch_read_varying_1",
+                 g->target->hasVecPrefetch() ? "__pseudo_prefetch_read_varying_1_native" :
+                                            "__prefetch_read_varying_1",
+                 false, true),
+
+        GSBOInfo(g->target->hasVecPrefetch() ? "__pseudo_prefetch_read_varying_2_native" :
+                                            "__prefetch_read_varying_2",
+                 g->target->hasVecPrefetch() ? "__pseudo_prefetch_read_varying_2_native" :
+                                            "__prefetch_read_varying_2",
+                 false, true),
+
+        GSBOInfo(g->target->hasVecPrefetch() ? "__pseudo_prefetch_read_varying_3_native" :
+                                            "__prefetch_read_varying_3",
+                 g->target->hasVecPrefetch() ? "__pseudo_prefetch_read_varying_3_native" :
+                                            "__prefetch_read_varying_3",
+                 false, true),
+
+        GSBOInfo(g->target->hasVecPrefetch() ? "__pseudo_prefetch_read_varying_nt_native" :
+                                            "__prefetch_read_varying_nt",
+                 g->target->hasVecPrefetch() ? "__pseudo_prefetch_read_varying_nt_native" :
+                                            "__prefetch_read_varying_nt",
+                 false, true),
     };
 
     int numGSFuncs = sizeof(gsFuncs) / sizeof(gsFuncs[0]);
@@ -2609,7 +3084,8 @@ lImproveMaskedStore(llvm::CallInst *callInst) {
         lCopyMetadata(lvalue, callInst);
         llvm::Instruction *store =
             new llvm::StoreInst(rvalue, lvalue, false /* not volatile */,
-                                g->opt.forceAlignedMemory ? 0 : info->align);
+                                g->opt.forceAlignedMemory ?
+                                    g->target->getNativeVectorAlignment() : info->align);
         lCopyMetadata(store, callInst);
         llvm::ReplaceInstWithInst(callInst, store);
         return true;
@@ -2672,7 +3148,8 @@ lImproveMaskedLoad(llvm::CallInst *callInst,
                                     callInst);
         llvm::Instruction *load =
             new llvm::LoadInst(ptr, callInst->getName(), false /* not volatile */,
-                               g->opt.forceAlignedMemory ? 0 : info->align,
+                               g->opt.forceAlignedMemory ?
+                                   g->target->getNativeVectorAlignment() : info->align,
                                (llvm::Instruction *)NULL);
         lCopyMetadata(load, callInst);
         llvm::ReplaceInstWithInst(callInst, load);
@@ -3077,6 +3554,9 @@ lEmitLoads(llvm::Value *basePtr, std::vector<CoalescedLoadOp> &loadOps,
         }
         case 4: {
             // 4-wide vector load
+            if (g->opt.forceAlignedMemory) {
+                align = g->target->getNativeVectorAlignment();
+            }
             llvm::VectorType *vt =
                 llvm::VectorType::get(LLVMTypes::Int32Type, 4);
             loadOps[i].load = lGEPAndLoad(basePtr, start, align,
@@ -3085,6 +3565,9 @@ lEmitLoads(llvm::Value *basePtr, std::vector<CoalescedLoadOp> &loadOps,
         }
         case 8: {
             // 8-wide vector load
+            if (g->opt.forceAlignedMemory) {
+                align = g->target->getNativeVectorAlignment();
+            }
             llvm::VectorType *vt =
                 llvm::VectorType::get(LLVMTypes::Int32Type, 8);
             loadOps[i].load = lGEPAndLoad(basePtr, start, align,
@@ -3926,149 +4409,170 @@ lReplacePseudoMaskedStore(llvm::CallInst *callInst) {
 static bool
 lReplacePseudoGS(llvm::CallInst *callInst) {
     struct LowerGSInfo {
-        LowerGSInfo(const char *pName, const char *aName, bool ig)
-            : isGather(ig) {
+        LowerGSInfo(const char *pName, const char *aName, bool ig, bool ip)
+            : isGather(ig), isPrefetch(ip) {
             pseudoFunc = m->module->getFunction(pName);
             actualFunc = m->module->getFunction(aName);
         }
         llvm::Function *pseudoFunc;
         llvm::Function *actualFunc;
         const bool isGather;
+        const bool isPrefetch;
     };
 
     LowerGSInfo lgsInfo[] = {
-        LowerGSInfo("__pseudo_gather32_i8",  "__gather32_i8",  true),
-        LowerGSInfo("__pseudo_gather32_i16", "__gather32_i16", true),
-        LowerGSInfo("__pseudo_gather32_i32", "__gather32_i32", true),
-        LowerGSInfo("__pseudo_gather32_float", "__gather32_float", true),
-        LowerGSInfo("__pseudo_gather32_i64", "__gather32_i64", true),
-        LowerGSInfo("__pseudo_gather32_double", "__gather32_double", true),
+        LowerGSInfo("__pseudo_gather32_i8",  "__gather32_i8",  true, false),
+        LowerGSInfo("__pseudo_gather32_i16", "__gather32_i16", true, false),
+        LowerGSInfo("__pseudo_gather32_i32", "__gather32_i32", true, false),
+        LowerGSInfo("__pseudo_gather32_float", "__gather32_float", true, false),
+        LowerGSInfo("__pseudo_gather32_i64", "__gather32_i64", true, false),
+        LowerGSInfo("__pseudo_gather32_double", "__gather32_double", true, false),
 
-        LowerGSInfo("__pseudo_gather64_i8",  "__gather64_i8",  true),
-        LowerGSInfo("__pseudo_gather64_i16", "__gather64_i16", true),
-        LowerGSInfo("__pseudo_gather64_i32", "__gather64_i32", true),
-        LowerGSInfo("__pseudo_gather64_float", "__gather64_float", true),
-        LowerGSInfo("__pseudo_gather64_i64", "__gather64_i64", true),
-        LowerGSInfo("__pseudo_gather64_double", "__gather64_double", true),
+        LowerGSInfo("__pseudo_gather64_i8",  "__gather64_i8",  true, false),
+        LowerGSInfo("__pseudo_gather64_i16", "__gather64_i16", true, false),
+        LowerGSInfo("__pseudo_gather64_i32", "__gather64_i32", true, false),
+        LowerGSInfo("__pseudo_gather64_float", "__gather64_float", true, false),
+        LowerGSInfo("__pseudo_gather64_i64", "__gather64_i64", true, false),
+        LowerGSInfo("__pseudo_gather64_double", "__gather64_double", true, false),
 
         LowerGSInfo("__pseudo_gather_factored_base_offsets32_i8",
-                    "__gather_factored_base_offsets32_i8",  true),
+                    "__gather_factored_base_offsets32_i8",  true, false),
         LowerGSInfo("__pseudo_gather_factored_base_offsets32_i16",
-                    "__gather_factored_base_offsets32_i16", true),
+                    "__gather_factored_base_offsets32_i16", true, false),
         LowerGSInfo("__pseudo_gather_factored_base_offsets32_i32",
-                    "__gather_factored_base_offsets32_i32", true),
+                    "__gather_factored_base_offsets32_i32", true, false),
         LowerGSInfo("__pseudo_gather_factored_base_offsets32_float",
-                    "__gather_factored_base_offsets32_float", true),
+                    "__gather_factored_base_offsets32_float", true, false),
         LowerGSInfo("__pseudo_gather_factored_base_offsets32_i64",
-                    "__gather_factored_base_offsets32_i64", true),
+                    "__gather_factored_base_offsets32_i64", true, false),
         LowerGSInfo("__pseudo_gather_factored_base_offsets32_double",
-                    "__gather_factored_base_offsets32_double", true),
+                    "__gather_factored_base_offsets32_double", true, false),
 
         LowerGSInfo("__pseudo_gather_factored_base_offsets64_i8",
-                    "__gather_factored_base_offsets64_i8",  true),
+                    "__gather_factored_base_offsets64_i8",  true, false),
         LowerGSInfo("__pseudo_gather_factored_base_offsets64_i16",
-                    "__gather_factored_base_offsets64_i16", true),
+                    "__gather_factored_base_offsets64_i16", true, false),
         LowerGSInfo("__pseudo_gather_factored_base_offsets64_i32",
-                    "__gather_factored_base_offsets64_i32", true),
+                    "__gather_factored_base_offsets64_i32", true, false),
         LowerGSInfo("__pseudo_gather_factored_base_offsets64_float",
-                    "__gather_factored_base_offsets64_float", true),
+                    "__gather_factored_base_offsets64_float", true, false),
         LowerGSInfo("__pseudo_gather_factored_base_offsets64_i64",
-                    "__gather_factored_base_offsets64_i64", true),
+                    "__gather_factored_base_offsets64_i64", true, false),
         LowerGSInfo("__pseudo_gather_factored_base_offsets64_double",
-                    "__gather_factored_base_offsets64_double", true),
+                    "__gather_factored_base_offsets64_double", true, false),
 
         LowerGSInfo("__pseudo_gather_base_offsets32_i8",
-                    "__gather_base_offsets32_i8",  true),
+                    "__gather_base_offsets32_i8",  true, false),
         LowerGSInfo("__pseudo_gather_base_offsets32_i16",
-                    "__gather_base_offsets32_i16", true),
+                    "__gather_base_offsets32_i16", true, false),
         LowerGSInfo("__pseudo_gather_base_offsets32_i32",
-                    "__gather_base_offsets32_i32", true),
+                    "__gather_base_offsets32_i32", true, false),
         LowerGSInfo("__pseudo_gather_base_offsets32_float",
-                    "__gather_base_offsets32_float", true),
+                    "__gather_base_offsets32_float", true, false),
         LowerGSInfo("__pseudo_gather_base_offsets32_i64",
-                    "__gather_base_offsets32_i64", true),
+                    "__gather_base_offsets32_i64", true, false),
         LowerGSInfo("__pseudo_gather_base_offsets32_double",
-                    "__gather_base_offsets32_double", true),
+                    "__gather_base_offsets32_double", true, false),
 
         LowerGSInfo("__pseudo_gather_base_offsets64_i8",
-                    "__gather_base_offsets64_i8",  true),
+                    "__gather_base_offsets64_i8",  true, false),
         LowerGSInfo("__pseudo_gather_base_offsets64_i16",
-                    "__gather_base_offsets64_i16", true),
+                    "__gather_base_offsets64_i16", true, false),
         LowerGSInfo("__pseudo_gather_base_offsets64_i32",
-                    "__gather_base_offsets64_i32", true),
+                    "__gather_base_offsets64_i32", true, false),
         LowerGSInfo("__pseudo_gather_base_offsets64_float",
-                    "__gather_base_offsets64_float", true),
+                    "__gather_base_offsets64_float", true, false),
         LowerGSInfo("__pseudo_gather_base_offsets64_i64",
-                    "__gather_base_offsets64_i64", true),
+                    "__gather_base_offsets64_i64", true, false),
         LowerGSInfo("__pseudo_gather_base_offsets64_double",
-                    "__gather_base_offsets64_double", true),
+                    "__gather_base_offsets64_double", true, false),
 
-        LowerGSInfo("__pseudo_scatter32_i8",  "__scatter32_i8",  false),
-        LowerGSInfo("__pseudo_scatter32_i16", "__scatter32_i16", false),
-        LowerGSInfo("__pseudo_scatter32_i32", "__scatter32_i32", false),
-        LowerGSInfo("__pseudo_scatter32_float", "__scatter32_float", false),
-        LowerGSInfo("__pseudo_scatter32_i64", "__scatter32_i64", false),
-        LowerGSInfo("__pseudo_scatter32_double", "__scatter32_double", false),
+        LowerGSInfo("__pseudo_scatter32_i8",  "__scatter32_i8",  false, false),
+        LowerGSInfo("__pseudo_scatter32_i16", "__scatter32_i16", false, false),
+        LowerGSInfo("__pseudo_scatter32_i32", "__scatter32_i32", false, false),
+        LowerGSInfo("__pseudo_scatter32_float", "__scatter32_float", false, false),
+        LowerGSInfo("__pseudo_scatter32_i64", "__scatter32_i64", false, false),
+        LowerGSInfo("__pseudo_scatter32_double", "__scatter32_double", false, false),
 
-        LowerGSInfo("__pseudo_scatter64_i8",  "__scatter64_i8",  false),
-        LowerGSInfo("__pseudo_scatter64_i16", "__scatter64_i16", false),
-        LowerGSInfo("__pseudo_scatter64_i32", "__scatter64_i32", false),
-        LowerGSInfo("__pseudo_scatter64_float", "__scatter64_float", false),
-        LowerGSInfo("__pseudo_scatter64_i64", "__scatter64_i64", false),
-        LowerGSInfo("__pseudo_scatter64_double", "__scatter64_double", false),
+        LowerGSInfo("__pseudo_scatter64_i8",  "__scatter64_i8",  false, false),
+        LowerGSInfo("__pseudo_scatter64_i16", "__scatter64_i16", false, false),
+        LowerGSInfo("__pseudo_scatter64_i32", "__scatter64_i32", false, false),
+        LowerGSInfo("__pseudo_scatter64_float", "__scatter64_float", false, false),
+        LowerGSInfo("__pseudo_scatter64_i64", "__scatter64_i64", false, false),
+        LowerGSInfo("__pseudo_scatter64_double", "__scatter64_double", false, false),
 
         LowerGSInfo("__pseudo_scatter_factored_base_offsets32_i8",
-                    "__scatter_factored_base_offsets32_i8",  false),
+                    "__scatter_factored_base_offsets32_i8",  false, false),
         LowerGSInfo("__pseudo_scatter_factored_base_offsets32_i16",
-                    "__scatter_factored_base_offsets32_i16", false),
+                    "__scatter_factored_base_offsets32_i16", false, false),
         LowerGSInfo("__pseudo_scatter_factored_base_offsets32_i32",
-                    "__scatter_factored_base_offsets32_i32", false),
+                    "__scatter_factored_base_offsets32_i32", false, false),
         LowerGSInfo("__pseudo_scatter_factored_base_offsets32_float",
-                    "__scatter_factored_base_offsets32_float", false),
+                    "__scatter_factored_base_offsets32_float", false, false),
         LowerGSInfo("__pseudo_scatter_factored_base_offsets32_i64",
-                    "__scatter_factored_base_offsets32_i64", false),
+                    "__scatter_factored_base_offsets32_i64", false, false),
         LowerGSInfo("__pseudo_scatter_factored_base_offsets32_double",
-                    "__scatter_factored_base_offsets32_double", false),
+                    "__scatter_factored_base_offsets32_double", false, false),
 
         LowerGSInfo("__pseudo_scatter_factored_base_offsets64_i8",
-                    "__scatter_factored_base_offsets64_i8",  false),
+                    "__scatter_factored_base_offsets64_i8",  false, false),
         LowerGSInfo("__pseudo_scatter_factored_base_offsets64_i16",
-                    "__scatter_factored_base_offsets64_i16", false),
+                    "__scatter_factored_base_offsets64_i16", false, false),
         LowerGSInfo("__pseudo_scatter_factored_base_offsets64_i32",
-                    "__scatter_factored_base_offsets64_i32", false),
+                    "__scatter_factored_base_offsets64_i32", false, false),
         LowerGSInfo("__pseudo_scatter_factored_base_offsets64_float",
-                    "__scatter_factored_base_offsets64_float", false),
+                    "__scatter_factored_base_offsets64_float", false, false),
         LowerGSInfo("__pseudo_scatter_factored_base_offsets64_i64",
-                    "__scatter_factored_base_offsets64_i64", false),
+                    "__scatter_factored_base_offsets64_i64", false, false),
         LowerGSInfo("__pseudo_scatter_factored_base_offsets64_double",
-                    "__scatter_factored_base_offsets64_double", false),
+                    "__scatter_factored_base_offsets64_double", false, false),
 
 
         LowerGSInfo("__pseudo_scatter_base_offsets32_i8",
-                    "__scatter_base_offsets32_i8",  false),
+                    "__scatter_base_offsets32_i8",  false, false),
         LowerGSInfo("__pseudo_scatter_base_offsets32_i16",
-                    "__scatter_base_offsets32_i16", false),
+                    "__scatter_base_offsets32_i16", false, false),
         LowerGSInfo("__pseudo_scatter_base_offsets32_i32",
-                    "__scatter_base_offsets32_i32", false),
+                    "__scatter_base_offsets32_i32", false, false),
         LowerGSInfo("__pseudo_scatter_base_offsets32_float",
-                    "__scatter_base_offsets32_float", false),
+                    "__scatter_base_offsets32_float", false, false),
         LowerGSInfo("__pseudo_scatter_base_offsets32_i64",
-                    "__scatter_base_offsets32_i64", false),
+                    "__scatter_base_offsets32_i64", false, false),
         LowerGSInfo("__pseudo_scatter_base_offsets32_double",
-                    "__scatter_base_offsets32_double", false),
+                    "__scatter_base_offsets32_double", false, false),
 
         LowerGSInfo("__pseudo_scatter_base_offsets64_i8",
-                    "__scatter_base_offsets64_i8",  false),
+                    "__scatter_base_offsets64_i8",  false, false),
         LowerGSInfo("__pseudo_scatter_base_offsets64_i16",
-                    "__scatter_base_offsets64_i16", false),
+                    "__scatter_base_offsets64_i16", false, false),
         LowerGSInfo("__pseudo_scatter_base_offsets64_i32",
-                    "__scatter_base_offsets64_i32", false),
+                    "__scatter_base_offsets64_i32", false, false),
         LowerGSInfo("__pseudo_scatter_base_offsets64_float",
-                    "__scatter_base_offsets64_float", false),
+                    "__scatter_base_offsets64_float", false, false),
         LowerGSInfo("__pseudo_scatter_base_offsets64_i64",
-                    "__scatter_base_offsets64_i64", false),
+                    "__scatter_base_offsets64_i64", false, false),
         LowerGSInfo("__pseudo_scatter_base_offsets64_double",
-                    "__scatter_base_offsets64_double", false),
+                    "__scatter_base_offsets64_double", false, false),
+
+        LowerGSInfo("__pseudo_prefetch_read_varying_1",
+                    "__prefetch_read_varying_1", false, true),
+        LowerGSInfo("__pseudo_prefetch_read_varying_1_native",
+                    "__prefetch_read_varying_1_native", false, true),
+
+        LowerGSInfo("__pseudo_prefetch_read_varying_2",
+                    "__prefetch_read_varying_2", false, true),
+        LowerGSInfo("__pseudo_prefetch_read_varying_2_native",
+                    "__prefetch_read_varying_2_native", false, true),
+
+        LowerGSInfo("__pseudo_prefetch_read_varying_3",
+                    "__prefetch_read_varying_3", false, true),
+        LowerGSInfo("__pseudo_prefetch_read_varying_3_native",
+                    "__prefetch_read_varying_3_native", false, true),
+
+        LowerGSInfo("__pseudo_prefetch_read_varying_nt",
+                    "__prefetch_read_varying_nt", false, true),
+        LowerGSInfo("__pseudo_prefetch_read_varying_nt_native",
+                    "__prefetch_read_varying_nt_native", false, true),
     };
 
     llvm::Function *calledFunc = callInst->getCalledFunction();
@@ -4095,7 +4599,7 @@ lReplacePseudoGS(llvm::CallInst *callInst) {
     if (gotPosition && g->target->getVectorWidth() > 1) {
         if (info->isGather)
             PerformanceWarning(pos, "Gather required to load value.");
-        else
+        else if (!info->isPrefetch)
             PerformanceWarning(pos, "Scatter required to store value.");
     }
     return true;
@@ -4241,6 +4745,42 @@ CreateIsCompileTimeConstantPass(bool isLastTry) {
     return new IsCompileTimeConstantPass(isLastTry);
 }
 
+//////////////////////////////////////////////////////////////////////////
+// DebugPass
+
+/** This pass is added in list of passes after optimizations which
+    we want to debug and print dump of LLVM IR in stderr. Also it
+    prints name and number of previous optimization.
+ */
+class DebugPass : public llvm::ModulePass {
+public:
+    static char ID;
+    DebugPass(char * output) : ModulePass(ID) {
+        sprintf(str_output, "%s", output);
+    }
+
+    const char *getPassName() const { return "Dump LLVM IR"; }
+    bool runOnModule(llvm::Module &m);
+
+private:
+    char str_output[100];
+};
+
+char DebugPass::ID = 0;
+
+bool
+DebugPass::runOnModule(llvm::Module &module) {
+    fprintf(stderr, "%s", str_output);
+    fflush(stderr);
+    module.dump();
+    return true;
+}
+
+static llvm::Pass *
+CreateDebugPass(char * output) {
+    return new DebugPass(output);
+}
+
 ///////////////////////////////////////////////////////////////////////////
 // MakeInternalFuncsStaticPass
 
@@ -4274,6 +4814,14 @@ char MakeInternalFuncsStaticPass::ID = 0;
 bool
 MakeInternalFuncsStaticPass::runOnModule(llvm::Module &module) {
     const char *names[] = {
+        "__avg_up_uint8",
+        "__avg_up_int8",
+        "__avg_up_uint16",
+        "__avg_up_int16",
+        "__avg_down_uint8",
+        "__avg_down_int8",
+        "__avg_down_uint16",
+        "__avg_down_int16",
         "__fast_masked_vload",
         "__gather_factored_base_offsets32_i8", "__gather_factored_base_offsets32_i16",
         "__gather_factored_base_offsets32_i32", "__gather_factored_base_offsets32_i64",
@@ -4332,6 +4880,8 @@ MakeInternalFuncsStaticPass::runOnModule(llvm::Module &module) {
         "__scatter64_i8", "__scatter64_i16",
         "__scatter64_i32", "__scatter64_i64",
         "__scatter64_float", "__scatter64_double",
+        "__prefetch_read_varying_1", "__prefetch_read_varying_2",
+        "__prefetch_read_varying_3", "__prefetch_read_varying_nt",
         "__keep_funcs_live",
     };
 
@@ -4353,3 +4903,755 @@ static llvm::Pass *
 CreateMakeInternalFuncsStaticPass() {
     return new MakeInternalFuncsStaticPass;
 }
+
+
+///////////////////////////////////////////////////////////////////////////
+// PeepholePass
+
+class PeepholePass : public llvm::BasicBlockPass {
+public:
+    PeepholePass();
+
+    const char *getPassName() const { return "Peephole Optimizations"; }
+    bool runOnBasicBlock(llvm::BasicBlock &BB);
+
+    static char ID;
+};
+
+char PeepholePass::ID = 0;
+
+PeepholePass::PeepholePass()
+    : BasicBlockPass(ID) {
+}
+
+#if !defined(LLVM_3_2)
+
+using namespace llvm::PatternMatch;
+
+template<typename Op_t, unsigned Opcode>
+struct CastClassTypes_match {
+    Op_t Op;
+    const llvm::Type *fromType, *toType;
+
+    CastClassTypes_match(const Op_t &OpMatch, const llvm::Type *f,
+                         const llvm::Type *t)
+        : Op(OpMatch), fromType(f), toType(t) {}
+
+    template<typename OpTy>
+    bool match(OpTy *V) {
+        if (llvm::Operator *O = llvm::dyn_cast<llvm::Operator>(V))
+            return (O->getOpcode() == Opcode && Op.match(O->getOperand(0)) &&
+                    O->getType() == toType &&
+                    O->getOperand(0)->getType() == fromType);
+        return false;
+    }
+};
+
+template<typename OpTy>
+inline CastClassTypes_match<OpTy, llvm::Instruction::SExt>
+m_SExt8To16(const OpTy &Op) {
+    return CastClassTypes_match<OpTy, llvm::Instruction::SExt>(
+        Op,
+        LLVMTypes::Int8VectorType,
+        LLVMTypes::Int16VectorType);
+}
+
+template<typename OpTy>
+inline CastClassTypes_match<OpTy, llvm::Instruction::ZExt>
+m_ZExt8To16(const OpTy &Op) {
+    return CastClassTypes_match<OpTy, llvm::Instruction::ZExt>(
+        Op,
+        LLVMTypes::Int8VectorType,
+        LLVMTypes::Int16VectorType);
+}
+
+
+template<typename OpTy>
+inline CastClassTypes_match<OpTy, llvm::Instruction::Trunc>
+m_Trunc16To8(const OpTy &Op) {
+    return CastClassTypes_match<OpTy, llvm::Instruction::Trunc>(
+        Op,
+        LLVMTypes::Int16VectorType,
+        LLVMTypes::Int8VectorType);
+}
+
+template<typename OpTy>
+inline CastClassTypes_match<OpTy, llvm::Instruction::SExt>
+m_SExt16To32(const OpTy &Op) {
+    return CastClassTypes_match<OpTy, llvm::Instruction::SExt>(
+        Op,
+        LLVMTypes::Int16VectorType,
+        LLVMTypes::Int32VectorType);
+}
+
+template<typename OpTy>
+inline CastClassTypes_match<OpTy, llvm::Instruction::ZExt>
+m_ZExt16To32(const OpTy &Op) {
+    return CastClassTypes_match<OpTy, llvm::Instruction::ZExt>(
+        Op,
+        LLVMTypes::Int16VectorType,
+        LLVMTypes::Int32VectorType);
+}
+
+
+template<typename OpTy>
+inline CastClassTypes_match<OpTy, llvm::Instruction::Trunc>
+m_Trunc32To16(const OpTy &Op) {
+    return CastClassTypes_match<OpTy, llvm::Instruction::Trunc>(
+        Op,
+        LLVMTypes::Int32VectorType,
+        LLVMTypes::Int16VectorType);
+}
+
+template<typename Op_t>
+struct UDiv2_match {
+    Op_t Op;
+
+    UDiv2_match(const Op_t &OpMatch)
+        : Op(OpMatch) {}
+
+    template<typename OpTy>
+    bool match(OpTy *V) {
+        llvm::BinaryOperator *bop;
+        llvm::ConstantDataVector *cdv;
+        if ((bop = llvm::dyn_cast<llvm::BinaryOperator>(V)) &&
+            (cdv = llvm::dyn_cast<llvm::ConstantDataVector>(bop->getOperand(1))) &&
+            cdv->getSplatValue() != NULL) {
+            const llvm::APInt &apInt = cdv->getUniqueInteger();
+
+            switch (bop->getOpcode()) {
+            case llvm::Instruction::UDiv:
+                // divide by 2
+                return (apInt.isIntN(2) && Op.match(bop->getOperand(0)));
+            case llvm::Instruction::LShr:
+                // shift left by 1
+                return (apInt.isIntN(1) && Op.match(bop->getOperand(0)));
+            default:
+                return false;
+            }
+        }
+        return false;
+    }
+};
+
+template<typename V>
+inline UDiv2_match<V>
+m_UDiv2(const V &v) {
+    return UDiv2_match<V>(v);
+}
+
+template<typename Op_t>
+struct SDiv2_match {
+    Op_t Op;
+
+    SDiv2_match(const Op_t &OpMatch)
+        : Op(OpMatch) {}
+
+    template<typename OpTy>
+    bool match(OpTy *V) {
+        llvm::BinaryOperator *bop;
+        llvm::ConstantDataVector *cdv;
+        if ((bop = llvm::dyn_cast<llvm::BinaryOperator>(V)) &&
+            (cdv = llvm::dyn_cast<llvm::ConstantDataVector>(bop->getOperand(1))) &&
+            cdv->getSplatValue() != NULL) {
+            const llvm::APInt &apInt = cdv->getUniqueInteger();
+
+            switch (bop->getOpcode()) {
+            case llvm::Instruction::SDiv:
+                // divide by 2
+                return (apInt.isIntN(2) && Op.match(bop->getOperand(0)));
+            case llvm::Instruction::AShr:
+                // shift left by 1
+                return (apInt.isIntN(1) && Op.match(bop->getOperand(0)));
+            default:
+                return false;
+            }
+        }
+        return false;
+    }
+};
+
+template<typename V>
+inline SDiv2_match<V>
+m_SDiv2(const V &v) {
+    return SDiv2_match<V>(v);
+}
+
+// Returns true if the given function has a call to an intrinsic function
+// in its definition.
+static bool
+lHasIntrinsicInDefinition(llvm::Function *func) {
+  llvm::Function::iterator bbiter = func->begin();
+  for (; bbiter != func->end(); ++bbiter) {
+    for (llvm::BasicBlock::iterator institer = bbiter->begin();
+         institer != bbiter->end(); ++institer) {
+      if (llvm::isa<llvm::IntrinsicInst>(institer))
+        return true;
+    }
+  }
+  return false;
+}
+
+static llvm::Instruction *
+lGetBinaryIntrinsic(const char *name, llvm::Value *opa, llvm::Value *opb) {
+  llvm::Function *func = m->module->getFunction(name);
+  Assert(func != NULL);
+
+  // Make sure that the definition of the llvm::Function has a call to an
+  // intrinsic function in its instructions; otherwise we will generate
+  // infinite loops where we "helpfully" turn the default implementations
+  // of target builtins like __avg_up_uint8 that are implemented with plain
+  // arithmetic ops into recursive calls to themselves.
+  if (lHasIntrinsicInDefinition(func))
+    return lCallInst(func, opa, opb, name);
+  else
+    return NULL;
+}
+
+//////////////////////////////////////////////////
+
+static llvm::Instruction *
+lMatchAvgUpUInt8(llvm::Value *inst) {
+    // (unsigned int8)(((unsigned int16)a + (unsigned int16)b + 1)/2)
+    llvm::Value *opa, *opb;
+    const llvm::APInt *delta;
+    if (match(inst, m_Trunc16To8(m_UDiv2(m_CombineOr(
+        m_CombineOr(
+            m_Add(m_ZExt8To16(m_Value(opa)),
+                  m_Add(m_ZExt8To16(m_Value(opb)), m_APInt(delta))),
+            m_Add(m_Add(m_ZExt8To16(m_Value(opa)), m_APInt(delta)),
+                  m_ZExt8To16(m_Value(opb)))),
+        m_Add(m_Add(m_ZExt8To16(m_Value(opa)), m_ZExt8To16(m_Value(opb))),
+              m_APInt(delta))))))) {
+        if (delta->isIntN(1) == false)
+            return NULL;
+
+        return lGetBinaryIntrinsic("__avg_up_uint8", opa, opb);
+    }
+    return NULL;
+}
+
+
+static llvm::Instruction *
+lMatchAvgDownUInt8(llvm::Value *inst) {
+    // (unsigned int8)(((unsigned int16)a + (unsigned int16)b)/2)
+    llvm::Value *opa, *opb;
+    if (match(inst, m_Trunc16To8(m_UDiv2(
+                    m_Add(m_ZExt8To16(m_Value(opa)),
+                          m_ZExt8To16(m_Value(opb))))))) {
+        return lGetBinaryIntrinsic("__avg_down_uint8", opa, opb);
+    }
+    return NULL;
+}
+
+static llvm::Instruction *
+lMatchAvgUpUInt16(llvm::Value *inst) {
+    // (unsigned int16)(((unsigned int32)a + (unsigned int32)b + 1)/2)
+    llvm::Value *opa, *opb;
+    const llvm::APInt *delta;
+    if (match(inst, m_Trunc32To16(m_UDiv2(m_CombineOr(
+        m_CombineOr(
+            m_Add(m_ZExt16To32(m_Value(opa)),
+                  m_Add(m_ZExt16To32(m_Value(opb)), m_APInt(delta))),
+            m_Add(m_Add(m_ZExt16To32(m_Value(opa)), m_APInt(delta)),
+                  m_ZExt16To32(m_Value(opb)))),
+        m_Add(m_Add(m_ZExt16To32(m_Value(opa)), m_ZExt16To32(m_Value(opb))),
+              m_APInt(delta))))))) {
+        if (delta->isIntN(1) == false)
+            return NULL;
+
+        return lGetBinaryIntrinsic("__avg_up_uint16", opa, opb);
+    }
+    return NULL;
+}
+
+
+static llvm::Instruction *
+lMatchAvgDownUInt16(llvm::Value *inst) {
+    // (unsigned int16)(((unsigned int32)a + (unsigned int32)b)/2)
+    llvm::Value *opa, *opb;
+    if (match(inst, m_Trunc32To16(m_UDiv2(
+                    m_Add(m_ZExt16To32(m_Value(opa)),
+                          m_ZExt16To32(m_Value(opb))))))) {
+        return lGetBinaryIntrinsic("__avg_down_uint16", opa, opb);
+    }
+    return NULL;
+}
+
+
+static llvm::Instruction *
+lMatchAvgUpInt8(llvm::Value *inst) {
+    // (int8)(((int16)a + (int16)b + 1)/2)
+    llvm::Value *opa, *opb;
+    const llvm::APInt *delta;
+    if (match(inst, m_Trunc16To8(m_SDiv2(m_CombineOr(
+        m_CombineOr(
+            m_Add(m_SExt8To16(m_Value(opa)),
+                  m_Add(m_SExt8To16(m_Value(opb)), m_APInt(delta))),
+            m_Add(m_Add(m_SExt8To16(m_Value(opa)), m_APInt(delta)),
+                  m_SExt8To16(m_Value(opb)))),
+        m_Add(m_Add(m_SExt8To16(m_Value(opa)), m_SExt8To16(m_Value(opb))),
+              m_APInt(delta))))))) {
+        if (delta->isIntN(1) == false)
+            return NULL;
+
+        return lGetBinaryIntrinsic("__avg_up_int8", opa, opb);
+    }
+    return NULL;
+}
+
+
+static llvm::Instruction *
+lMatchAvgDownInt8(llvm::Value *inst) {
+    // (int8)(((int16)a + (int16)b)/2)
+    llvm::Value *opa, *opb;
+    if (match(inst, m_Trunc16To8(m_SDiv2(
+                    m_Add(m_SExt8To16(m_Value(opa)),
+                          m_SExt8To16(m_Value(opb))))))) {
+        return lGetBinaryIntrinsic("__avg_down_int8", opa, opb);
+    }
+    return NULL;
+}
+
+static llvm::Instruction *
+lMatchAvgUpInt16(llvm::Value *inst) {
+    // (int16)(((int32)a + (int32)b + 1)/2)
+    llvm::Value *opa, *opb;
+    const llvm::APInt *delta;
+    if (match(inst, m_Trunc32To16(m_SDiv2(m_CombineOr(
+        m_CombineOr(
+            m_Add(m_SExt16To32(m_Value(opa)),
+                  m_Add(m_SExt16To32(m_Value(opb)), m_APInt(delta))),
+            m_Add(m_Add(m_SExt16To32(m_Value(opa)), m_APInt(delta)),
+                  m_SExt16To32(m_Value(opb)))),
+        m_Add(m_Add(m_SExt16To32(m_Value(opa)), m_SExt16To32(m_Value(opb))),
+              m_APInt(delta))))))) {
+        if (delta->isIntN(1) == false)
+            return NULL;
+
+        return lGetBinaryIntrinsic("__avg_up_int16", opa, opb);
+    }
+    return NULL;
+}
+
+static llvm::Instruction *
+lMatchAvgDownInt16(llvm::Value *inst) {
+    // (int16)(((int32)a + (int32)b)/2)
+    llvm::Value *opa, *opb;
+    if (match(inst, m_Trunc32To16(m_SDiv2(
+                    m_Add(m_SExt16To32(m_Value(opa)),
+                          m_SExt16To32(m_Value(opb))))))) {
+        return lGetBinaryIntrinsic("__avg_down_int16", opa, opb);
+    }
+    return NULL;
+}
+#endif // !LLVM_3_2
+
+
+bool
+PeepholePass::runOnBasicBlock(llvm::BasicBlock &bb) {
+    DEBUG_START_PASS("PeepholePass");
+
+    bool modifiedAny = false;
+ restart:
+    for (llvm::BasicBlock::iterator iter = bb.begin(), e = bb.end(); iter != e; ++iter) {
+        llvm::Instruction *inst = &*iter;
+
+        llvm::Instruction *builtinCall = NULL;
+#if !defined(LLVM_3_2)
+        if (!builtinCall)
+          builtinCall = lMatchAvgUpUInt8(inst);
+        if (!builtinCall)
+          builtinCall = lMatchAvgUpUInt16(inst);
+        if (!builtinCall)
+          builtinCall = lMatchAvgDownUInt8(inst);
+        if (!builtinCall)
+          builtinCall = lMatchAvgDownUInt16(inst);
+        if (!builtinCall)
+          builtinCall = lMatchAvgUpInt8(inst);
+        if (!builtinCall)
+          builtinCall = lMatchAvgUpInt16(inst);
+        if (!builtinCall)
+          builtinCall = lMatchAvgDownInt8(inst);
+        if (!builtinCall)
+          builtinCall = lMatchAvgDownInt16(inst);
+#endif // !LLVM_3_2
+        if (builtinCall != NULL) {
+          llvm::ReplaceInstWithInst(inst, builtinCall);
+          modifiedAny = true;
+          goto restart;
+        }
+    }
+
+    DEBUG_END_PASS("PeepholePass");
+
+    return modifiedAny;
+}
+
+static llvm::Pass *
+CreatePeepholePass() {
+  return new PeepholePass;
+}
+
+/** Given an llvm::Value known to be an integer, return its value as
+    an int64_t.
+*/
+static int64_t
+lGetIntValue(llvm::Value *offset) {
+  llvm::ConstantInt *intOffset = llvm::dyn_cast<llvm::ConstantInt>(offset);
+  Assert(intOffset && (intOffset->getBitWidth() == 32 ||
+                       intOffset->getBitWidth() == 64));
+  return intOffset->getSExtValue();
+}
+
+///////////////////////////////////////////////////////////////////////////
+// ReplaceStdlibShiftPass
+
+class ReplaceStdlibShiftPass : public llvm::BasicBlockPass {
+public:
+    static char ID;
+    ReplaceStdlibShiftPass() : BasicBlockPass(ID) {
+    }
+
+    const char *getPassName() const { return "Resolve \"replace extract insert chains\""; }
+    bool runOnBasicBlock(llvm::BasicBlock &BB);
+
+};
+
+char ReplaceStdlibShiftPass::ID = 0;
+
+bool
+ReplaceStdlibShiftPass::runOnBasicBlock(llvm::BasicBlock &bb) {
+    DEBUG_START_PASS("ReplaceStdlibShiftPass");
+    bool modifiedAny = false;
+
+    llvm::Function *shifts[6];
+    shifts[0] = m->module->getFunction("__shift_i8");
+    shifts[1] = m->module->getFunction("__shift_i16");
+    shifts[2] = m->module->getFunction("__shift_i32");
+    shifts[3] = m->module->getFunction("__shift_i64");
+    shifts[4] = m->module->getFunction("__shift_float");
+    shifts[5] = m->module->getFunction("__shift_double");
+
+    for (llvm::BasicBlock::iterator iter = bb.begin(), e = bb.end(); iter != e; ++iter) {
+        llvm::Instruction *inst = &*iter;
+
+        if (llvm::CallInst *ci = llvm::dyn_cast<llvm::CallInst>(inst)) {
+          llvm::Function *func = ci->getCalledFunction();
+          for (int i = 0; i < 6; i++) {
+            if (shifts[i] && (shifts[i] == func)) {
+              // we matched a call
+              llvm::Value *shiftedVec = ci->getArgOperand(0);
+              llvm::Value *shiftAmt = ci->getArgOperand(1);
+              if (llvm::isa<llvm::Constant>(shiftAmt)) {
+                int vectorWidth = g->target->getVectorWidth();
+                int * shuffleVals = new int[vectorWidth];
+                int shiftInt = lGetIntValue(shiftAmt);
+                for (int i = 0; i < vectorWidth; i++) {
+                  int s = i + shiftInt;
+                  s = (s < 0) ? vectorWidth : s;
+                  s = (s >= vectorWidth) ? vectorWidth : s;
+                  shuffleVals[i] = s;
+                }
+                llvm::Value *shuffleIdxs = LLVMInt32Vector(shuffleVals);
+                llvm::Value *zeroVec = llvm::ConstantAggregateZero::get(shiftedVec->getType());
+                llvm::Value *shuffle = new llvm::ShuffleVectorInst(shiftedVec, zeroVec,
+                                                                   shuffleIdxs, "vecShift", ci);
+                ci->replaceAllUsesWith(shuffle);
+                modifiedAny = true;
+                delete [] shuffleVals;
+              } else {
+                PerformanceWarning(SourcePos(), "Stdlib shift() called without constant shift amount.");
+              }
+            }
+          }
+        }
+    }
+
+    DEBUG_END_PASS("ReplaceStdlibShiftPass");
+
+    return modifiedAny;
+}
+
+
+static llvm::Pass *
+CreateReplaceStdlibShiftPass() {
+    return new ReplaceStdlibShiftPass();
+}
+
+
+
+///////////////////////////////////////////////////////////////////////////////
+// FixBooleanSelect
+//
+// The problem is that in LLVM 3.3, optimizer doesn't like
+// the following instruction sequence:
+//    %cmp = fcmp olt <8 x float> %a, %b
+//    %sext_cmp = sext <8 x i1> %cmp to <8 x i32>
+//    %new_mask = and <8 x i32> %sext_cmp, %mask
+// and optimizes it to the following:
+//    %cmp = fcmp olt <8 x float> %a, %b
+//    %cond = select <8 x i1> %cmp, <8 x i32> %mask, <8 x i32> zeroinitializer
+//
+// It wouldn't be a problem if codegen produced good code for it. But it
+// doesn't, especially for vectors larger than native vectors.
+//
+// This optimization reverts this pattern and should be the last one before
+// code gen.
+//
+// Note that this problem was introduced in LLVM 3.3. But in LLVM 3.4 it was
+// fixed. See commit r194542.
+//
+// After LLVM 3.3 this optimization should probably stay for experimental
+// purposes and code should be compared with and without this optimization from
+// time to time to make sure that LLVM does right thing.
+///////////////////////////////////////////////////////////////////////////////
+
+class FixBooleanSelectPass : public llvm::FunctionPass {
+public:
+    static char ID;
+    FixBooleanSelectPass() :FunctionPass(ID) {}
+
+    const char *getPassName() const { return "Resolve \"replace extract insert chains\""; }
+    bool runOnFunction(llvm::Function &F);
+
+private:
+    llvm::Instruction* fixSelect(llvm::SelectInst* sel, llvm::SExtInst* sext);
+};
+
+char FixBooleanSelectPass::ID = 0;
+
+llvm::Instruction* FixBooleanSelectPass::fixSelect(llvm::SelectInst* sel, llvm::SExtInst* sext) {
+    // Select instruction result type and its integer equivalent
+    llvm::VectorType *orig_type = llvm::dyn_cast<llvm::VectorType>(sel->getType());
+    llvm::VectorType *int_type = llvm::VectorType::getInteger(orig_type);
+
+    // Result value and optional pointer to instruction to delete
+    llvm::Instruction *result = 0, *optional_to_delete = 0;
+
+    // It can be vector of integers or vector of floating point values.
+    if (orig_type->getElementType()->isIntegerTy()) {
+        // Generate sext+and, remove select.
+        result = llvm::BinaryOperator::CreateAnd(sext, sel->getTrueValue(), "and_mask", sel);
+    } else {
+        llvm::BitCastInst* bc = llvm::dyn_cast<llvm::BitCastInst>(sel->getTrueValue());
+
+        if (bc && bc->hasOneUse() && bc->getSrcTy()->isIntOrIntVectorTy() && bc->getSrcTy()->isVectorTy() &&
+                llvm::isa<llvm::Instruction>(bc->getOperand(0)) &&
+                llvm::dyn_cast<llvm::Instruction>(bc->getOperand(0))->getParent() == sel->getParent()) {
+            // Bitcast is casting form integer type, it's operand is instruction, which is located in the same basic block (otherwise it's unsafe to use it).
+            // bitcast+select => sext+and+bicast
+            // Create and
+            llvm::BinaryOperator* and_inst = llvm::BinaryOperator::CreateAnd(sext, bc->getOperand(0), "and_mask", sel);
+            // Bitcast back to original type
+            result = new llvm::BitCastInst(and_inst, sel->getType(), "bitcast_mask_out", sel);
+            // Original bitcast will be removed
+            optional_to_delete = bc;
+        } else {
+            // General case: select => bitcast+sext+and+bitcast
+            // Bitcast
+            llvm::BitCastInst* bc_in = new llvm::BitCastInst(sel->getTrueValue(), int_type, "bitcast_mask_in", sel);
+            // And
+            llvm::BinaryOperator* and_inst = llvm::BinaryOperator::CreateAnd(sext, bc_in, "and_mask", sel);
+            // Bitcast back to original type
+            result = new llvm::BitCastInst(and_inst, sel->getType(), "bitcast_mask_out", sel);
+        }
+    }
+
+    // Done, finalize.
+    sel->replaceAllUsesWith(result);
+    sel->eraseFromParent();
+    if (optional_to_delete) {
+        optional_to_delete->eraseFromParent();
+    }
+
+    return result;
+}
+
+bool
+FixBooleanSelectPass::runOnFunction(llvm::Function &F) {
+    bool modifiedAny = false;
+
+    // LLVM 3.3 only
+#if defined(LLVM_3_3)
+
+    // Don't optimize generic targets.
+    if (g->target->getISA() == Target::GENERIC) {
+        return false;
+    }
+
+    for (llvm::Function::iterator I = F.begin(), E = F.end();
+         I != E; ++I) {
+        llvm::BasicBlock* bb = &*I;
+        for (llvm::BasicBlock::iterator iter = bb->begin(), e = bb->end(); iter != e; ++iter) {
+            llvm::Instruction *inst = &*iter;
+
+            llvm::CmpInst *cmp = llvm::dyn_cast<llvm::CmpInst>(inst);
+
+            if (cmp && 
+                cmp->getType()->isVectorTy() &&
+                cmp->getType()->getVectorElementType()->isIntegerTy(1)) {
+
+                // Search for select instruction uses.
+                int selects = 0;
+                llvm::VectorType* sext_type = 0;
+                for (llvm::Instruction::use_iterator it=cmp->use_begin(); it!=cmp->use_end(); ++it ) {
+                    llvm::SelectInst* sel = llvm::dyn_cast<llvm::SelectInst>(*it);
+                    if (sel &&
+                        sel->getType()->isVectorTy() &&
+                        sel->getType()->getScalarSizeInBits() > 1) {
+                        selects++;
+                        // We pick the first one, but typical case when all select types are the same.
+                        sext_type = llvm::dyn_cast<llvm::VectorType>(sel->getType());
+                        break;
+                    }
+                }
+                if (selects == 0) {
+                    continue;
+                }
+                // Get an integer equivalent, if it's not yet an integer.
+                sext_type = llvm::VectorType::getInteger(sext_type);
+
+                // Do transformation
+                llvm::BasicBlock::iterator iter_copy=iter;
+                llvm::Instruction* next_inst = &*(++iter_copy);
+                // Create or reuse sext
+                llvm::SExtInst* sext = llvm::dyn_cast<llvm::SExtInst>(next_inst);
+                if (sext &&
+                    sext->getOperand(0) == cmp &&
+                    sext->getDestTy() == sext_type) {
+                    // This sext can be reused
+                } else {
+                    if (next_inst) {
+                        sext = new llvm::SExtInst(cmp, sext_type, "sext_cmp", next_inst);
+                    } else {
+                        sext = new llvm::SExtInst(cmp, sext_type, "sext_cmp", bb);
+                    }
+                }
+
+                // Walk and fix selects
+                std::vector<llvm::SelectInst*> sel_uses;
+                for (llvm::Instruction::use_iterator it=cmp->use_begin(); it!=cmp->use_end(); ++it) {
+                    llvm::SelectInst* sel = llvm::dyn_cast<llvm::SelectInst>(*it);
+                    if (sel &&
+                        sel->getType()->getScalarSizeInBits() == sext_type->getScalarSizeInBits()) {
+
+                        // Check that second operand is zero.
+                        llvm::Constant* false_cond = llvm::dyn_cast<llvm::Constant>(sel->getFalseValue());
+                        if (false_cond &&
+                            false_cond->isZeroValue()) {
+                            sel_uses.push_back(sel);
+                            modifiedAny = true;
+                        }
+                    }
+                }
+
+                for (int i=0; i<sel_uses.size(); i++) {
+                    fixSelect(sel_uses[i], sext);
+                }
+            }
+        }
+    }
+
+#endif // LLVM 3.3
+
+    return modifiedAny;
+}
+
+
+static llvm::Pass *
+CreateFixBooleanSelectPass() {
+    return new FixBooleanSelectPass();
+}
+
+#ifdef ISPC_NVPTX_ENABLED
+///////////////////////////////////////////////////////////////////////////////
+// Detect addrspace(3)
+///////////////////////////////////////////////////////////////////////////////
+
+class PromoteLocalToPrivatePass: public llvm::BasicBlockPass
+{
+  public:
+    static char ID; // Pass identification, replacement for typeid
+    PromoteLocalToPrivatePass() : BasicBlockPass(ID) {}
+
+    bool runOnBasicBlock(llvm::BasicBlock &BB);
+};
+
+char PromoteLocalToPrivatePass::ID = 0;
+
+bool 
+PromoteLocalToPrivatePass::runOnBasicBlock(llvm::BasicBlock &BB)
+{
+  std::vector<llvm::AllocaInst*> Allocas;
+
+  bool modifiedAny  = false;
+
+#if 1
+restart:
+  for (llvm::BasicBlock::iterator I = BB.begin(), E = --BB.end(); I != E; ++I)
+  {
+    llvm::Instruction *inst = &*I;
+    if (llvm::CallInst *ci = llvm::dyn_cast<llvm::CallInst>(inst))
+    {
+      llvm::Function *func = ci->getCalledFunction();
+      if (func && func->getName() == "llvm.trap")
+      {
+        std::vector<llvm::Type*> funcTyArgs;
+        llvm::FunctionType *funcTy = llvm::FunctionType::get(
+            /*Result=*/llvm::Type::getVoidTy(*g->ctx),
+            /*Params=*/funcTyArgs,
+            /*isVarArg=*/false);
+        llvm::InlineAsm *trap_ptx = llvm::InlineAsm::get(funcTy, "trap;", "", false);
+        assert(trap_ptx != NULL);
+        llvm::Instruction *trap_call = llvm::CallInst::Create(trap_ptx);
+        assert(trap_call != NULL);
+        llvm::ReplaceInstWithInst(ci, trap_call);
+        modifiedAny = true;
+        goto restart;
+      }
+    }
+  }
+#endif
+
+#if 0
+  llvm::Function *cvtFunc = m->module->getFunction("__cvt_loc2gen_var");
+
+  // Find allocas that are safe to promote, by looking at all instructions in
+  // the entry node
+  for (llvm::BasicBlock::iterator I = BB.begin(), E = --BB.end(); I != E; ++I)
+  {
+    llvm::Instruction *inst = &*I;
+    if (llvm::CallInst *ci = llvm::dyn_cast<llvm::CallInst>(inst))
+    {
+      llvm::Function *func = ci->getCalledFunction();
+      if (cvtFunc && (cvtFunc == func))
+      {
+#if 0
+        fprintf(stderr , "--found cvt-- name= %s \n",
+            I->getName().str().c_str());
+#endif
+        llvm::AllocaInst *alloca = new llvm::AllocaInst(LLVMTypes::Int64Type, "opt_loc2var", ci);
+        assert(alloca != NULL);
+#if 0
+        const int align = 8; // g->target->getNativeVectorAlignment();
+        alloca->setAlignment(align);
+#endif
+        ci->replaceAllUsesWith(alloca);
+        modifiedAny = true;
+      }
+    }
+  }
+#endif
+  return modifiedAny;
+}
+
+static llvm::Pass *
+CreatePromoteLocalToPrivatePass() {
+    return new PromoteLocalToPrivatePass();
+}
+
+
+
+#endif /* ISPC_NVPTX_ENABLED */
+

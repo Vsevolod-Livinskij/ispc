@@ -1,4 +1,4 @@
-;;  Copyright (c) 2010-2012, Intel Corporation
+;;  Copyright (c) 2010-2015, Intel Corporation
 ;;  All rights reserved.
 ;;
 ;;  Redistribution and use in source and binary forms, with or without
@@ -40,6 +40,7 @@ stdlib_core()
 packed_load_and_store()
 scans()
 int64minmax()
+saturation_arithmetic()
 
 include(`target-avx-common.ll')
 
@@ -137,19 +138,14 @@ define <16 x float> @__sqrt_varying_float(<16 x float>) nounwind readonly always
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; svml
 
-; FIXME: need either to wire these up to the 8-wide SVML entrypoints,
-; or, use the macro to call the 4-wide ones 4x with our 16-wide
-; vectors...
+include(`svml.m4')
+;; single precision
+svml_declare(float,f8,8)
+svml_define_x(float,f8,8,f,16)
 
-declare <16 x float> @__svml_sin(<16 x float>)
-declare <16 x float> @__svml_cos(<16 x float>)
-declare void @__svml_sincos(<16 x float>, <16 x float> *, <16 x float> *)
-declare <16 x float> @__svml_tan(<16 x float>)
-declare <16 x float> @__svml_atan(<16 x float>)
-declare <16 x float> @__svml_atan2(<16 x float>, <16 x float>)
-declare <16 x float> @__svml_exp(<16 x float>)
-declare <16 x float> @__svml_log(<16 x float>)
-declare <16 x float> @__svml_pow(<16 x float>, <16 x float>)
+;; double precision
+svml_declare(double,4,4)
+svml_define_x(double,4,4,d,16)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; float min/max
@@ -270,6 +266,33 @@ reduce_equal(16)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; horizontal int32 ops
+
+declare <2 x i64> @llvm.x86.sse2.psad.bw(<16 x i8>, <16 x i8>) nounwind readnone
+
+define i16 @__reduce_add_int8(<16 x i8>) nounwind readnone alwaysinline {
+  %rv = call <2 x i64> @llvm.x86.sse2.psad.bw(<16 x i8> %0,
+                                              <16 x i8> zeroinitializer)
+  %r0 = extractelement <2 x i64> %rv, i32 0
+  %r1 = extractelement <2 x i64> %rv, i32 1
+  %r = add i64 %r0, %r1
+  %r16 = trunc i64 %r to i16
+  ret i16 %r16
+}
+
+define internal <16 x i16> @__add_varying_i16(<16 x i16>,
+                                  <16 x i16>) nounwind readnone alwaysinline {
+  %r = add <16 x i16> %0, %1
+  ret <16 x i16> %r
+}
+
+define internal i16 @__add_uniform_i16(i16, i16) nounwind readnone alwaysinline {
+  %r = add i16 %0, %1
+  ret i16 %r
+}
+
+define i16 @__reduce_add_int16(<16 x i16>) nounwind readnone alwaysinline {
+  reduce16(i16, @__add_varying_i16, @__add_uniform_i16)
+}
 
 define <16 x i32> @__add_varying_int32(<16 x i32>,
                                        <16 x i32>) nounwind readnone alwaysinline {
@@ -404,7 +427,7 @@ define <16 x i32> @__masked_load_i32(i8 *, <16 x i32> %mask) nounwind alwaysinli
   %val0 = call <8 x float> @llvm.x86.avx.maskload.ps.256(i8 * %0, <8 x float> %mask0)
   %mask1 = shufflevector <16 x float> %floatmask, <16 x float> undef,
      <8 x i32> <i32 8, i32 9, i32 10, i32 11, i32 12, i32 13, i32 14, i32 15>
-  %ptr1 = getelementptr i8 * %0, i32 32   ;; 8x4 bytes = 32
+  %ptr1 = getelementptr PTR_OP_ARGS(`i8') %0, i32 32    ;; 8x4 bytes = 32
   %val1 = call <8 x float> @llvm.x86.avx.maskload.ps.256(i8 * %ptr1, <8 x float> %mask1)
 
   %retval = shufflevector <8 x float> %val0, <8 x float> %val1,
@@ -431,11 +454,11 @@ define <16 x i64> @__masked_load_i64(i8 *, <16 x i32> %mask) nounwind alwaysinli
   %mask3d = bitcast <8 x i32> %mask3 to <4 x double>
 
   %val0d = call <4 x double> @llvm.x86.avx.maskload.pd.256(i8 * %0, <4 x double> %mask0d)
-  %ptr1 = getelementptr i8 * %0, i32 32
+  %ptr1 = getelementptr PTR_OP_ARGS(`i8') %0, i32 32
   %val1d = call <4 x double> @llvm.x86.avx.maskload.pd.256(i8 * %ptr1, <4 x double> %mask1d)
-  %ptr2 = getelementptr i8 * %0, i32 64
+  %ptr2 = getelementptr PTR_OP_ARGS(`i8') %0, i32 64
   %val2d = call <4 x double> @llvm.x86.avx.maskload.pd.256(i8 * %ptr2, <4 x double> %mask2d)
-  %ptr3 = getelementptr i8 * %0, i32 96
+  %ptr3 = getelementptr PTR_OP_ARGS(`i8') %0, i32 96
   %val3d = call <4 x double> @llvm.x86.avx.maskload.pd.256(i8 * %ptr3, <4 x double> %mask3d)
 
   %val01 = shufflevector <4 x double> %val0d, <4 x double> %val1d,
@@ -481,7 +504,7 @@ define void @__masked_store_i32(<16 x i32>* nocapture, <16 x i32>,
         <8 x i32> <i32 8, i32 9, i32 10, i32 11, i32 12, i32 13, i32 14, i32 15>
 
   call void @llvm.x86.avx.maskstore.ps.256(i8 * %ptr, <8 x float> %mask0, <8 x float> %val0)
-  %ptr1 = getelementptr i8 * %ptr, i32 32
+  %ptr1 = getelementptr PTR_OP_ARGS(`i8') %ptr, i32 32
   call void @llvm.x86.avx.maskstore.ps.256(i8 * %ptr1, <8 x float> %mask1, <8 x float> %val1)
 
   ret void
@@ -516,11 +539,11 @@ define void @__masked_store_i64(<16 x i64>* nocapture, <16 x i64>,
      <4 x i32> <i32 12, i32 13, i32 14, i32 15>
 
   call void @llvm.x86.avx.maskstore.pd.256(i8 * %ptr, <4 x double> %mask0d, <4 x double> %val0)
-  %ptr1 = getelementptr i8 * %ptr, i32 32
+  %ptr1 = getelementptr PTR_OP_ARGS(`i8') %ptr, i32 32
   call void @llvm.x86.avx.maskstore.pd.256(i8 * %ptr1, <4 x double> %mask1d, <4 x double> %val1)
-  %ptr2 = getelementptr i8 * %ptr, i32 64
+  %ptr2 = getelementptr PTR_OP_ARGS(`i8') %ptr, i32 64
   call void @llvm.x86.avx.maskstore.pd.256(i8 * %ptr2, <4 x double> %mask2d, <4 x double> %val2)
-  %ptr3 = getelementptr i8 * %ptr, i32 96
+  %ptr3 = getelementptr PTR_OP_ARGS(`i8') %ptr, i32 96
   call void @llvm.x86.avx.maskstore.pd.256(i8 * %ptr3, <4 x double> %mask3d, <4 x double> %val3)
 
   ret void
@@ -536,7 +559,7 @@ declare <8 x float> @llvm.x86.avx.blendv.ps.256(<8 x float>, <8 x float>,
 define void @__masked_store_blend_i32(<16 x i32>* nocapture, <16 x i32>, 
                                       <16 x i32>) nounwind alwaysinline {
   %maskAsFloat = bitcast <16 x i32> %2 to <16 x float>
-  %oldValue = load <16 x i32>* %0, align 4
+  %oldValue = load PTR_OP_ARGS(`<16 x i32>')  %0, align 4
   %oldAsFloat = bitcast <16 x i32> %oldValue to <16 x float>
   %newAsFloat = bitcast <16 x i32> %1 to <16 x float>
  
@@ -573,7 +596,7 @@ declare <4 x double> @llvm.x86.avx.blendv.pd.256(<4 x double>, <4 x double>,
 
 define void @__masked_store_blend_i64(<16 x i64>* nocapture %ptr, <16 x i64> %newi64, 
                                       <16 x i32> %mask) nounwind alwaysinline {
-  %oldValue = load <16 x i64>* %ptr, align 8
+  %oldValue = load PTR_OP_ARGS(`<16 x i64>')  %ptr, align 8
   %old = bitcast <16 x i64> %oldValue to <16 x double>
   %old0d = shufflevector <16 x double> %old, <16 x double> undef,
      <4 x i32> <i32 0, i32 1, i32 2, i32 3>
@@ -665,3 +688,12 @@ define <16 x double> @__max_varying_double(<16 x double>, <16 x double>) nounwin
   binary4to16(ret, double, @llvm.x86.avx.max.pd.256, %0, %1)
   ret <16 x double> %ret
 }
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; reciprocals in double precision, if supported
+
+rsqrtd_decl()
+rcpd_decl()
+
+transcendetals_decl()
+trigonometry_decl()

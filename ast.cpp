@@ -1,5 +1,5 @@
 /*
-  Copyright (c) 2011-2012, Intel Corporation
+  Copyright (c) 2011-2015, Intel Corporation
   All rights reserved.
 
   Redistribution and use in source and binary forms, with or without
@@ -223,7 +223,8 @@ WalkAST(ASTNode *node, ASTPreCallBackFunc preFunc, ASTPostCallBackFunc postFunc,
         else if ((fce = dynamic_cast<FunctionCallExpr *>(node)) != NULL) {
             fce->func = (Expr *)WalkAST(fce->func, preFunc, postFunc, data);
             fce->args = (ExprList *)WalkAST(fce->args, preFunc, postFunc, data);
-            fce->launchCountExpr = (Expr *)WalkAST(fce->launchCountExpr, preFunc,
+            for (int k = 0; k < 3; k++)
+              fce->launchCountExpr[0] = (Expr *)WalkAST(fce->launchCountExpr[0], preFunc,
                                                    postFunc, data);
         }
         else if ((ie = dynamic_cast<IndexExpr *>(node)) != NULL) {
@@ -388,6 +389,11 @@ lCheckAllOffSafety(ASTNode *node, void *data) {
         return false;
     }
 
+    if (dynamic_cast<PrintStmt *>(node) != NULL) {
+        *okPtr = false;
+        return false;
+    }
+
     if (dynamic_cast<NewExpr *>(node) != NULL ||
         dynamic_cast<DeleteStmt *>(node) != NULL) {
         // We definitely don't want to run the uniform variants of these if
@@ -446,7 +452,7 @@ lCheckAllOffSafety(ASTNode *node, void *data) {
         }
 
         int32_t indices[ISPC_MAX_NVEC];
-        int count = ce->AsInt32(indices);
+        int count = ce->GetValues(indices);
         for (int i = 0; i < count; ++i) {
             if (indices[i] < 0 || indices[i] >= nElements) {
                 // Index is out of bounds -> not safe
@@ -469,6 +475,20 @@ lCheckAllOffSafety(ASTNode *node, void *data) {
     if (dynamic_cast<PtrDerefExpr *>(node) != NULL) {
         *okPtr = false;
         return false;
+    }
+
+    /*
+      Don't allow turning if/else to straight-line-code if we 
+      assign to a uniform.
+    */
+    AssignExpr *ae;
+    if ((ae = dynamic_cast<AssignExpr *>(node)) != NULL) {
+      if (ae->GetType()) {
+        if (ae->GetType()->IsUniformType()) {
+          *okPtr = false;
+          return false;
+        }
+      }
     }
 
     return true;
